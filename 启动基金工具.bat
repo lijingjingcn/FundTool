@@ -1,26 +1,34 @@
 @echo off
-chcp 65001 >nul
+rem ============================================
+rem  Fund Info Tool launcher
+rem  NOTE: keep this file ASCII-only. Chinese text
+rem  breaks cmd.exe parsing due to codepage issues.
+rem ============================================
 cd /d %~dp0
 
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [错误] 未找到 Python，请先安装 Python 3.10 及以上版本：https://www.python.org/downloads/
+    echo [ERROR] Python not found. Please install Python 3.10+ first:
+    echo         https://www.python.org/downloads/
     pause
     exit /b 1
 )
 
 python -c "import streamlit, pdfplumber, requests" >nul 2>nul
 if errorlevel 1 (
-    echo 首次运行，正在安装依赖（约 1-2 分钟）...
+    echo First run: installing dependencies, please wait 1-2 minutes...
     python -m pip install -r requirements.txt
     if errorlevel 1 (
-        echo [错误] 依赖安装失败，请检查网络后重试
+        echo [ERROR] Failed to install dependencies. Check network and retry.
         pause
         exit /b 1
     )
 )
 
-set STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-echo 正在启动基金信息查询工具，浏览器将自动打开...
-python -m streamlit run app.py
+echo Starting Fund Info Tool...
+echo Browser will open at http://localhost:8501 automatically.
+echo Keep this window open while using the tool. Press Ctrl+C here to stop.
+rem open browser after a short delay (server needs a few seconds to start)
+start "" cmd /c "timeout /t 6 /nobreak >nul & start http://localhost:8501"
+python -m streamlit run app.py --server.headless true --browser.gatherUsageStats false
 pause
