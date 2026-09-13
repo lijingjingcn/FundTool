@@ -8,6 +8,7 @@
 import json
 import os
 import re
+import time
 import uuid
 
 import pandas as pd
@@ -17,7 +18,10 @@ from fundtool import EastFundClient, FundApiError, JsonCache, format_range, get_
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "我的基金.json")
-MAX_CODES = 60
+# 查询不设总量上限：全部代码自动分批处理，批次之间稍作停顿以免请求过密。
+# 首次查询每只需下载解析报告PDF（约2~5秒/只），已查过的走缓存。
+BATCH_SIZE = 30
+BATCH_PAUSE = 8  # 批间停顿秒数
 
 st.set_page_config(page_title="基金信息查询工具", page_icon="📊", layout="wide")
 
@@ -81,10 +85,14 @@ def yi(value, unit="亿"):
 
 
 def query_all(codes, with_holding, status_box, progress_bar):
-    """逐只查询，带进度显示。返回 {代码: 行数据} 与 {代码: 错误}"""
+    """逐只查询，自动分批直到全部完成。返回 {代码: 行数据} 与 {代码: 错误}"""
     results, errors = {}, {}
     total = len(codes)
+    n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
     for i, code in enumerate(codes):
+        if i > 0 and i % BATCH_SIZE == 0:
+            status_box.update(label=f"第 {i // BATCH_SIZE}/{n_batches} 批完成，批间停顿 {BATCH_PAUSE} 秒…")
+            time.sleep(BATCH_PAUSE)
         try:
             info = get_client().basic_info(code)
             if info is None:
@@ -108,8 +116,8 @@ def query_all(codes, with_holding, status_box, progress_bar):
             results[code] = row
         except FundApiError as e:
             errors[code] = str(e)
-        status_box.update(label=f"正在查询第 {i + 1}/{total} 只…")
-        progress_bar.progress((i + 1) / total, text=f"查询进度 {i + 1}/{total}")
+        status_box.update(label=f"正在查询第 {i + 1}/{total} 只（第 {i // BATCH_SIZE + 1}/{n_batches} 批）")
+        progress_bar.progress((i + 1) / total, text=f"查询进度 {i + 1}/{total}（共 {n_batches} 批）")
     return results, errors
 
 
@@ -258,10 +266,7 @@ if submitted:
     if not all_codes:
         st.warning("请先在左侧分组中输入至少一个 6 位基金代码")
     else:
-        if len(all_codes) > MAX_CODES:
-            all_codes = all_codes[:MAX_CODES]
-            st.info(f"一次最多查询 {MAX_CODES} 只，已截取前 {MAX_CODES} 个")
-        with st.status(f"正在查询 {len(all_codes)} 只基金…", expanded=True) as status_box:
+        with st.status(f"正在查询 {len(all_codes)} 只基金（自动分批，每批 {BATCH_SIZE} 只）…", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="准备查询…")
             results, errors = query_all(all_codes, with_holding, status_box, progress_bar)
             progress_bar.empty()
