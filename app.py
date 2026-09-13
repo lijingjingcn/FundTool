@@ -17,7 +17,8 @@ import streamlit as st
 from fundtool import EastFundClient, FundApiError, JsonCache, format_range, get_manager_holding
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "我的基金.json")
+# 测试通过 FUNDTOOL_DATA_FILE 指向临时文件，避免冒烟测试覆盖真实分组数据
+DATA_FILE = os.environ.get("FUNDTOOL_DATA_FILE") or os.path.join(BASE_DIR, "我的基金.json")
 # 查询不设总量上限：全部代码自动分批处理，批次之间稍作停顿以免请求过密。
 # 首次查询每只需下载解析报告PDF（约2~5秒/只），已查过的走缓存。
 BATCH_SIZE = 30
