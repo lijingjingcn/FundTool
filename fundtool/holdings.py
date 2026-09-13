@@ -176,6 +176,66 @@ def format_range(val):
 
 _CACHE_VER = 7  # 解析/缓存策略变更时 +1，让旧缓存自动失效
 
+# 区间档位：经理持有是区间披露，档位有序，用于两期对比
+_RANK = {"0": 0, "0-10": 1, "10-50": 2, "50-100": 3, ">100": 4}
+
+
+def range_rank(val):
+    """区间值 -> 档位（0~4），无法识别返回 None"""
+    if not val:
+        return None
+    v = _norm(str(val)).replace("万份", "")
+    for ch in "~～—至":
+        v = v.replace(ch, "-")
+    return _RANK.get(v)
+
+
+def range_change(cur, prev):
+    """两期区间对比：'持平' / '升N档' / '降N档'；任一期无法识别返回 None"""
+    a, b = range_rank(cur), range_rank(prev)
+    if a is None or b is None:
+        return None
+    d = a - b
+    if d == 0:
+        return "持平"
+    return ("升" if d > 0 else "降") + f"{abs(d)}档"
+
+
+def _periodic_reports(notices):
+    """公告列表中的正式中报/年报（列表已按发布时间倒序）"""
+    return [
+        it
+        for it in notices
+        if ("年度报告" in it.get("TITLE", "") or "中期报告" in it.get("TITLE", ""))
+        and "提示" not in it.get("TITLE", "")
+        and "摘要" not in it.get("TITLE", "")
+    ]
+
+
+def _parse_report(client, rep):
+    """下载并解析单份定期报告（按公告ID永久缓存）。rep：公告列表项。"""
+    cache = client.cache
+    art_code = rep["ID"]
+    parsed = cache.get(f"holding_parse_v{_CACHE_VER}", art_code)
+    if parsed is None:
+        detail = client.notice_detail(art_code)
+        attaches = detail.get("attach_list") or []
+        url = (attaches[0] or {}).get("attach_url") if attaches else detail.get("attach_url")
+        if not url:
+            raise RuntimeError("公告没有 PDF 附件")
+        pdf_path = client.download_pdf(url, f"{art_code}.pdf")
+        parsed = parse_manager_holding(pdf_path) or {}
+        parsed.setdefault("manager_range", "")
+        parsed.setdefault("manager_line", "")
+        parsed.setdefault("employees_exact", None)
+        parsed.setdefault("page", 0)
+        parsed.setdefault("snippet", "")
+        if not parsed.get("manager_range") and not parsed.get("employees_exact"):
+            parsed["parse_failed"] = True
+        parsed["pdf_url"] = url
+        cache.set(f"holding_parse_v{_CACHE_VER}", art_code, parsed)
+    return parsed
+
 
 def get_manager_holding(client, code):
     """完整链路：公告列表 -> 最新中报/年报 -> 下载 PDF -> 解析。结果按公告ID永久缓存。
@@ -190,37 +250,12 @@ def get_manager_holding(client, code):
 
     result = {"status": "error", "error": "未知错误"}
     try:
-        notices = client.periodic_notices(code)
-        reports = [
-            it
-            for it in notices
-            if ("年度报告" in it.get("TITLE", "") or "中期报告" in it.get("TITLE", ""))
-            and "提示" not in it.get("TITLE", "")
-            and "摘要" not in it.get("TITLE", "")
-        ]
+        reports = _periodic_reports(client.periodic_notices(code))
         if not reports:
             result = {"status": "no_report", "error": "该基金暂无年度报告/中期报告披露"}
         else:
             rep = reports[0]  # 列表本身按发布时间倒序
-            art_code = rep["ID"]
-            parsed = cache.get(f"holding_parse_v{_CACHE_VER}", art_code)
-            if parsed is None:
-                detail = client.notice_detail(art_code)
-                attaches = detail.get("attach_list") or []
-                url = (attaches[0] or {}).get("attach_url") if attaches else detail.get("attach_url")
-                if not url:
-                    raise RuntimeError("公告没有 PDF 附件")
-                pdf_path = client.download_pdf(url, f"{art_code}.pdf")
-                parsed = parse_manager_holding(pdf_path) or {}
-                parsed.setdefault("manager_range", "")
-                parsed.setdefault("manager_line", "")
-                parsed.setdefault("employees_exact", None)
-                parsed.setdefault("page", 0)
-                parsed.setdefault("snippet", "")
-                if not parsed.get("manager_range") and not parsed.get("employees_exact"):
-                    parsed["parse_failed"] = True
-                parsed["pdf_url"] = url
-                cache.set(f"holding_parse_v{_CACHE_VER}", art_code, parsed)
+            parsed = _parse_report(client, rep)
             result = {
                 "status": "ok",
                 "report_title": rep.get("TITLE", ""),
@@ -232,4 +267,39 @@ def get_manager_holding(client, code):
     except Exception as e:  # noqa: BLE001 —— 任何环节失败都要在界面上给出可读的错误
         result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
     cache.set(f"holding_v{_CACHE_VER}", code, result)
+    return result
+
+
+def get_manager_holding_history(client, code, n=2):
+    """最近 n 份中报/年报的经理持有（新→旧），每期含环比 change（'持平'/'升N档'/'降N档'）。
+
+    每份报告的解析按公告ID永久缓存，因此只有新报告才需要下载解析。
+    网络类错误（FundApiError）不缓存直接抛出；无报告返回 []。
+    """
+    cache = client.cache
+    hit = cache.get(f"holding_hist_v{_CACHE_VER}", f"{code}_n{n}", ttl=7 * 86400)
+    if hit is not None:
+        return hit
+
+    reports = _periodic_reports(client.periodic_notices(code))[:n]
+    result = []
+    for rep in reports:
+        try:
+            parsed = _parse_report(client, rep)
+            rng = parsed.get("manager_range") or ""
+        except FundApiError:
+            raise  # 网络错误不缓存
+        except Exception:  # noqa: BLE001 —— 单份报告解析失败不拖垮整段历史
+            rng = ""
+        result.append({
+            "report_title": rep.get("TITLE", ""),
+            "report_date": rep.get("PUBLISHDATEDesc", ""),
+            "manager_range": rng,
+            "pdf_url": (cache.get(f"holding_parse_v{_CACHE_VER}", rep["ID"]) or {}).get("pdf_url", ""),
+            "change": "",
+        })
+    for i, r in enumerate(result):
+        prev = result[i + 1]["manager_range"] if i + 1 < len(result) else ""
+        r["change"] = range_change(r["manager_range"], prev) or ""
+    cache.set(f"holding_hist_v{_CACHE_VER}", f"{code}_n{n}", result)
     return result

@@ -9,6 +9,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -22,6 +23,7 @@ DATA_FILE = os.environ["FUNDTOOL_DATA_FILE"]
 HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
+from fundtool.holdings import range_change  # noqa: E402
 
 
 def write_groups(groups):
@@ -67,6 +69,12 @@ def main():
     assert row["名称"] == "易方达蓝筹精选混合", row["名称"]
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
     assert any("999999" in e.value for e in at.error), [e.value for e in at.error]
+    # 持有较上期列 + 详情页历史表（当前中报 vs 上一份年报）
+    assert "持有较上期" in df.columns, df.columns
+    assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", row["持有较上期"]), row["持有较上期"]
+    tables = [t.value.data if hasattr(t.value, "data") else t.value for t in at.table]
+    assert any("报告期" in list(v.columns) for v in tables if hasattr(v, "columns")), "详情页应有历史对比表"
+    assert range_change(">100", "10-50") == "升2档" and range_change("10-50", ">100") == "降2档" and range_change("10-50", "10-50") == "持平" and range_change(">100", "") is None
     warn_texts = [w.value for w in at.warning]
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
     print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示")

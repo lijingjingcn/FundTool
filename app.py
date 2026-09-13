@@ -14,7 +14,14 @@ import uuid
 import pandas as pd
 import streamlit as st
 
-from fundtool import EastFundClient, FundApiError, JsonCache, format_range, get_manager_holding
+from fundtool import (
+    EastFundClient,
+    FundApiError,
+    JsonCache,
+    format_range,
+    get_manager_holding,
+    get_manager_holding_history,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 测试通过 FUNDTOOL_DATA_FILE 指向临时文件，避免冒烟测试覆盖真实分组数据
@@ -28,6 +35,8 @@ BATCH_SIZE = 30
 BATCH_PAUSE = 8  # 批间停顿秒数
 # 迷你基金阈值（元）：净资产低于 5000 万的基金有清盘风险，界面特殊提醒
 SMALL_NAV_YUAN = 0.5e8
+# 经理持有份额对比的报告期数：2 = 当前期报 + 上一份中报/年报
+HISTORY_N = 2
 
 st.set_page_config(page_title="基金信息查询工具", page_icon="📊", layout="wide")
 
@@ -130,6 +139,15 @@ def nav_yuan(value):
         return None
 
 
+def _fmt_change(chg):
+    """'升1档'/'降2档'/'持平' -> '↑1档'/'↓2档'/'→持平'"""
+    if not chg:
+        return "--"
+    if chg == "持平":
+        return "→持平"
+    return ("↑" if chg.startswith("升") else "↓") + chg[1:]
+
+
 def query_all(codes, with_holding, status_box, progress_bar):
     """逐只查询，自动分批直到全部完成。返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}"""
     results, errors, small_nav = {}, {}, {}
@@ -164,6 +182,13 @@ def query_all(codes, with_holding, status_box, progress_bar):
                 else:
                     row["基金经理持有本基金"] = "--"
                     row["持有数据来源"] = hold.get("error", "获取失败")
+                # 与上一份中报/年报对比（各报告解析结果永久缓存，只有新报告需要下载）
+                try:
+                    hist = get_manager_holding_history(get_client(), code, HISTORY_N)
+                    chg = hist[0].get("change") if hist else ""
+                except FundApiError:
+                    chg = ""
+                row["持有较上期"] = _fmt_change(chg)
             results[code] = row
         except FundApiError as e:
             errors[code] = str(e)
@@ -220,6 +245,23 @@ def render_fund_detail(code, with_holding=None):
             )
             if hold.get("manager_line"):
                 st.text(f"报告原文：{hold['manager_line']}")
+            try:
+                hist = get_manager_holding_history(get_client(), code, HISTORY_N)
+            except FundApiError:
+                hist = []
+            if hist:
+                st.markdown("**近几期变化（中报/年报逐期对比）**")
+                hdf = pd.DataFrame(
+                    [
+                        {
+                            "报告期": f"{h.get('report_date', '')}{'中报' if '中期' in h.get('report_title', '') else '年报'}",
+                            "经理持有": format_range(h.get("manager_range")) or "--",
+                            "较上期": _fmt_change(h.get("change")),
+                        }
+                        for h in hist
+                    ]
+                )
+                st.table(hdf.style.hide(axis="index"))
         else:
             st.warning(f"未能获取：{hold.get('error')}")
     tenure = get_client().manager_tenure(code)
