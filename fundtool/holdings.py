@@ -104,12 +104,18 @@ def _find_manager_line(lines, share_class=None):
     - 占位"-"：表示未持有，按 0 处理（如 018554）
     - 文字表述版式：如"……本基金基金经理未持有本基金。"
     """
+    # 标准栏名为"本基金基金经理持有本开放式基金"（可能折行成 …持有本开/放式基金），
+    # 旧版式行名为"基金经理等人员"；逐级放宽匹配，避免窗口内其他含"基金经理"
+    # 的行（如说明文字）抢先命中
     label_idx = None
-    for j, line in enumerate(lines):
-        if _TOC_LINE.search(line) or "基金经理" not in line:
-            continue
-        label_idx = j
-        break
+    for pat in ("基金经理持有本", "基金经理等人员", "基金经理"):
+        for j, line in enumerate(lines):
+            if _TOC_LINE.search(line) or pat not in line:
+                continue
+            label_idx = j
+            break
+        if label_idx is not None:
+            break
     if label_idx is None:
         return None
     label = lines[label_idx]
