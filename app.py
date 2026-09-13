@@ -23,6 +23,8 @@ DATA_FILE = os.environ.get("FUNDTOOL_DATA_FILE") or os.path.join(BASE_DIR, "我�
 # 首次查询每只需下载解析报告PDF（约2~5秒/只），已查过的走缓存。
 BATCH_SIZE = 30
 BATCH_PAUSE = 8  # 批间停顿秒数
+# 迷你基金阈值（元）：净资产低于 5000 万的基金有清盘风险，界面特殊提醒
+SMALL_NAV_YUAN = 0.5e8
 
 st.set_page_config(page_title="基金信息查询工具", page_icon="📊", layout="wide")
 
@@ -94,9 +96,17 @@ def yi(value, unit="亿"):
         return "--"
 
 
+def nav_yuan(value):
+    """净资产原始值（元），解析失败返回 None"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def query_all(codes, with_holding, status_box, progress_bar):
-    """逐只查询，自动分批直到全部完成。返回 {代码: 行数据} 与 {代码: 错误}"""
-    results, errors = {}, {}
+    """逐只查询，自动分批直到全部完成。返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}"""
+    results, errors, small_nav = {}, {}, {}
     total = len(codes)
     n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
     for i, code in enumerate(codes):
@@ -108,9 +118,14 @@ def query_all(codes, with_holding, status_box, progress_bar):
             if info is None:
                 errors[code] = "未找到该基金（代码不存在或已清盘）"
                 continue
+            nav = nav_yuan(info.get("ENDNAV"))
+            scale = yi(info.get("ENDNAV"))
+            if nav is not None and nav < SMALL_NAV_YUAN:
+                scale += " ⚠️"
+                small_nav[code] = scale
             row = {"代码": code, "名称": info.get("SHORTNAME", "--"), "类型": info.get("FTYPE", "--"),
                    "基金经理": (info.get("JJJL") or "--").replace(",", "、"),
-                   "规模(净资产)": yi(info.get("ENDNAV")),
+                   "规模(净资产)": scale,
                    "规模日期": (info.get("FEGMRQ") or "--").replace(" 00:00:00", ""),
                    "净值日期": info.get("FSRQ", "--")}
             if with_holding:
@@ -128,7 +143,7 @@ def query_all(codes, with_holding, status_box, progress_bar):
             errors[code] = str(e)
         status_box.update(label=f"正在查询第 {i + 1}/{total} 只（第 {i // BATCH_SIZE + 1}/{n_batches} 批）")
         progress_bar.progress((i + 1) / total, text=f"查询进度 {i + 1}/{total}（共 {n_batches} 批）")
-    return results, errors
+    return results, errors, small_nav
 
 
 def render_fund_detail(code):
@@ -142,6 +157,8 @@ def render_fund_detail(code):
     c2.metric("净资产规模", yi(info.get("ENDNAV")))
     c3.metric("份额规模", yi(info.get("FEGM"), "亿份"))
     c4.metric("风险等级", {"1": "低", "2": "中低", "3": "中", "4": "中高", "5": "高"}.get(str(info.get("RISKLEVEL", "")), "--"))
+    if nav_yuan(info.get("ENDNAV")) is not None and nav_yuan(info.get("ENDNAV")) < SMALL_NAV_YUAN:
+        st.error("⚠️ 该基金净资产低于 0.5 亿（迷你基金），存在清盘风险，请留意基金公告")
     left, right = st.columns(2)
     left.write(
         f"- **基金公司**：{info.get('JJGS', '--')}\n"
@@ -192,11 +209,24 @@ def render_fund_detail(code):
 
 # 跨分组重复行的底色（半透明琥珀色，深浅主题下都可读）
 _DUP_BG = "background-color: rgba(255,170,0,0.32)"
+# 迷你基金（净资产<0.5亿）规模单元格的底色（半透明红色）
+_SMALL_BG = "background-color: rgba(229,57,53,0.45)"
 
 
 def _highlight_dup_rows(dup_codes):
     def _hl(row):
         return [_DUP_BG if row["代码"] in dup_codes else ""] * len(row)
+
+    return _hl
+
+
+def _highlight_small_scale(small_codes, codes):
+    """规模列按行高亮：只给迷你基金所在行的「规模(净资产)」单元格上底色"""
+
+    def _hl(col):
+        if col.name != "规模(净资产)":
+            return [""] * len(col)
+        return [_SMALL_BG if c in small_codes else "" for c in codes]
 
     return _hl
 
@@ -210,9 +240,13 @@ def render_group(name, codes, results):
     rows = [results[c] for c in codes if c in results]
     if rows:
         df = pd.DataFrame(rows)
+        small_nav = st.session_state.get("small_nav") or {}
+        small_here = {c for c in df["代码"] if c in small_nav}
         # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）
-        styler = df.style.apply(_highlight_dup_rows(highlight), axis=1).hide(axis="index")
-        st.table(styler)
+        styler = df.style.apply(_highlight_dup_rows(highlight), axis=1)
+        if small_here:
+            styler = styler.apply(_highlight_small_scale(small_here, df["代码"]), axis=0)
+        st.table(styler.hide(axis="index"))
         st.download_button(
             "⬇️ 导出本组 CSV",
             df.to_csv(index=False).encode("utf-8-sig"),
@@ -329,11 +363,12 @@ if submitted:
     else:
         with st.status(f"正在查询 {len(all_codes)} 只基金（自动分批，每批 {BATCH_SIZE} 只）…", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="准备查询…")
-            results, errors = query_all(all_codes, with_holding, status_box, progress_bar)
+            results, errors, small_nav = query_all(all_codes, with_holding, status_box, progress_bar)
             progress_bar.empty()
             status_box.update(label="查询完成", state="complete", expanded=False)
         st.session_state["results"] = results
         st.session_state["errors"] = errors
+        st.session_state["small_nav"] = small_nav
         st.session_state["plan"] = plan
         st.session_state["with_holding"] = with_holding
 
@@ -354,6 +389,14 @@ if results is not None:
             for g, codes in dup_within.items()
         )
         st.warning(f"✍️ 以下分组内重复输入的代码已自动合并为一条（同样高亮显示）：{desc}")
+    small_nav = st.session_state.get("small_nav") or {}
+    if small_nav:
+        small_desc = "、".join(
+            f"{results[c]['名称']}（`{c}`，{(results[c].get('规模(净资产)') or '').strip()}）"
+            for c in small_nav if c in results
+        )
+        if small_desc:
+            st.error(f"⚠️ 以下 {len(small_nav)} 只基金净资产低于 0.5 亿（迷你基金，规模单元格红色高亮，注意清盘风险）：{small_desc}")
     plan = [(n, [c for c in cs if c not in (st.session_state.get("errors") or {})]) for n, cs in st.session_state.get("plan") or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:
