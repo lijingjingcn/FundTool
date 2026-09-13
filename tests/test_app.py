@@ -107,6 +107,19 @@ def main():
         assert len(overview_dfs(at2)) == 2, "恢复后应直接查出两个分组结果"
         print("✅ 场景3 通过：输入已保存，下次启动免输入直接查询")
 
+        # ---- 场景4：分组排序——「↓/↑」调整显示顺序并持久化 ----
+        with open(DATA_FILE, encoding="utf-8") as f:
+            gids = [g["id"] for g in json.load(f)["groups"]]
+        assert len(gids) == 2, gids
+        down_btn = next(b for b in at2.button if b.key == f"down_{gids[0]}")
+        down_btn.click().run()
+        assert "161725" in at2.text_area[0].value, at2.text_area[0].value
+        assert "010790" in at2.text_area[1].value, at2.text_area[1].value
+        at3 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+        at3.run()
+        assert "161725" in at3.text_area[0].value, "排序应持久化到 我的基金.json"
+        print("✅ 场景4 通过：分组可上移/下移排序，顺序持久化")
+
         print("\n全部冒烟测试通过 🎉")
     finally:
         restore_backup()

@@ -241,13 +241,27 @@ def _delete_group(gid):
     save_groups(st.session_state.groups)
 
 
+def _move_group(gid, delta):
+    """上移（delta=-1）/下移（delta=+1）调整分组显示顺序，并持久化"""
+    groups = st.session_state.groups
+    i = next(idx for idx, g in enumerate(groups) if g["id"] == gid)
+    j = i + delta
+    if 0 <= j < len(groups):
+        groups[i], groups[j] = groups[j], groups[i]
+        save_groups(groups)
+
+
 with st.sidebar:
     st.header("🔎 查询")
     st.caption("输入自动保存到本地（我的基金.json），下次启动直接点“开始查询”")
-    for g in st.session_state.groups:
+    for pos, g in enumerate(st.session_state.groups):
         gid = g["id"]
-        c_name, c_del = st.columns([5, 1])
+        c_name, c_up, c_down, c_del = st.columns([4, 1, 1, 1])
         c_name.text_input("分组名", value=g["name"], key=f"name_{gid}", label_visibility="collapsed")
+        c_up.button("↑", key=f"up_{gid}", on_click=_move_group, args=(gid, -1),
+                    disabled=pos == 0, help="上移该分组")
+        c_down.button("↓", key=f"down_{gid}", on_click=_move_group, args=(gid, 1),
+                      disabled=pos == len(st.session_state.groups) - 1, help="下移该分组")
         c_del.button("🗑", key=f"del_{gid}", on_click=_delete_group, args=(gid,), help="删除该分组")
         st.text_area(
             "基金代码",
