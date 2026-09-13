@@ -79,13 +79,24 @@ def main():
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
     print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示")
 
-    # ---- 场景1b：分级基金（A/C 份额）经理持有取“合计”行，不误取份额级别值 ----
+    # ---- 场景1b：多级别（A/C 份额）报表按查询代码的份额级别取行 ----
+    # 010790 是 A 类代码：经理 A 类 >100、C 类 0、合计 >100 → 应显示 A 行 >100
     at.text_area[0].set_value("010790").run()
     click_query(at)
     df = overview_dfs(at)[0]
     row = df[df["代码"] == "010790"].iloc[0]
     assert row["基金经理持有本基金"] == ">100万份", f"010790 解析错误: {row['基金经理持有本基金']}"
-    print("✅ 场景1b 通过：010790 分级报表取合计行（>100万份）")
+    print("✅ 场景1b 通过：010790（A类）取 A 级行（>100万份）")
+
+    # ---- 场景1c：多级别报表不得把 C 类持有算到 A 类头上 ----
+    # 015887 是 A 类代码：经理 A 类 0~10、C 类 >100、合计 >100 → 应显示 A 行 0~10
+    at.text_area[0].set_value("015887").run()
+    click_query(at)
+    df = overview_dfs(at)[0]
+    row = df[df["代码"] == "015887"].iloc[0]
+    assert row["基金经理持有本基金"] == "0~10万份", f"015887 解析错误: {row['基金经理持有本基金']}"
+    print("✅ 场景1c 通过：015887（A类）取 A 级行（0~10万份），C类持有未误算")
+    at.text_area[0].set_value("010790").run()  # 恢复第一组内容，供场景2构造跨组重复
 
     # ---- 场景2：添加第二个分组，两组分别查询；010790 跨组重复应触发高亮 ----
     add_btn = next(b for b in at.button if "添加分组" in b.label)

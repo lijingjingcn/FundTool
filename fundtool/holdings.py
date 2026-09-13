@@ -52,15 +52,57 @@ def _val_in(text):
     return "0" if _DASH_TOKEN.search(text) else None
 
 
-def _find_manager_line(lines):
-    """定位基金经理持有份额的值。返回 (区间值, 说明行)。
+def _last_class_mark(line):
+    """行内最后一个"独立"的份额级别字母（A/C/E…，可带"类"），如行尾 ' C'、
+    独立一行 'A'、名称内结尾 '海富通均衡甄选混合C'。无则返回 None"""
+    m = None
+    for mm in re.finditer(r"([A-Z])类?(?=[\s)）、,，]|$)", line):
+        m = mm.group(1)
+    return m
+
+
+def _class_map(lines, lo, hi):
+    """从行区间构建 {份额级别: 区间值}（含'合计'）。
+
+    值与级别字母同行为准；独行值就近与 ±1 行内的级别字母配对
+    （PDF 抽行会把 份额级别/区间 两列的顺序打乱）。
+    """
+    marks, vals, result = [], [], {}
+    for i in range(lo, hi):
+        line = lines[i]
+        if _TOC_LINE.search(line):
+            continue
+        if "合计" in line:
+            t = _val_in(line) or (i + 1 < len(lines) and _val_in(lines[i + 1])) or ""
+            if t:
+                result["合计"] = t
+            continue
+        v = _val_in(line)
+        if v:
+            vals.append((i, v))
+        m = _last_class_mark(line)
+        if m:
+            marks.append((i, m))
+    for vi, v in vals:
+        best, bd = None, 3
+        for mi, m in marks:
+            d = abs(mi - vi)
+            if d < bd:
+                bd, best = d, m
+        if best:
+            result[best] = v
+    return result
+
+
+def _find_manager_line(lines, share_class=None):
+    """定位基金经理持有份额的值。返回 (区间值, 说明行, 各份额级别映射或 None)。
 
     覆盖的版式：
-    - 单级基金：标签和值在同一行，如“本基金基金经理持有本开放式基金 >100”
-    - 分级基金（A/C 份额）：标签被折行，各份额级别的值与标签行交错，
-      正确取值是随后的“合计”行（如 010790：标签行混入 C 类的 0，合计为 >100）
-    - 占位“-”：表示未持有，按 0 处理（如 018554）
-    - 旧版式：行名为“基金经理等人员”
+    - 单级基金：标签和值在同一行，如"本基金基金经理持有本开放式基金 >100"
+    - 多级基金（A/C 等份额级别分行披露）：优先取查询代码所属份额类别的行；
+      类别行缺失或未指定类别时取"合计"行
+    - 占位"-"：表示未持有，按 0 处理（如 018554）
+    - 文字表述版式：如"……本基金基金经理未持有本基金。"
     """
     label_idx = None
     for j, line in enumerate(lines):
@@ -71,27 +113,25 @@ def _find_manager_line(lines):
     if label_idx is None:
         return None
     label = lines[label_idx]
-    # 文字表述版式：如“截至本报告期末，……及本基金基金经理未持有本基金。”
-    # 注意句子可能在“未持/有”之间折行，需要与下一行拼接后再判断
+    # 文字表述版式：句子可能在"未持/有"之间折行，需要与下一行拼接后再判断
     follow = lines[label_idx + 1] if label_idx + 1 < len(lines) else ""
     joined = label + follow
     if "未持有" in joined:
-        return "0", joined.strip()
-    # 分级基金：优先取经理行之后的“合计”行（各份额级别的汇总）
-    for line in lines[label_idx + 1 : label_idx + 6]:
-        if "合计" in line:
-            val = _val_in(line)
-            if val:
-                return val, f"{label.strip()} … {line.strip()}"
+        return "0", joined.strip(), None
+    cmap = _class_map(lines, max(0, label_idx - 3), min(len(lines), label_idx + 6))
+    if share_class and cmap.get(share_class):
+        return cmap[share_class], f"{label.strip()} … {share_class}类 {cmap[share_class]}", cmap
+    if cmap.get("合计"):
+        return cmap["合计"], f"{label.strip()} … 合计 {cmap['合计']}", cmap or None
     # 单级基金：数值就在标签行上
     val = _val_in(label[label.find("基金经理") :])
     if val:
-        return val, label.strip()
+        return val, label.strip(), cmap or None
     # 标签被折行且无合计行：取随后最近的区间值
     for line in lines[label_idx + 1 : label_idx + 4]:
         val = _val_in(line)
         if val:
-            return val, f"{label.strip()} … {line.strip()}"
+            return val, f"{label.strip()} … {line.strip()}", cmap or None
     return None
 
 
@@ -123,8 +163,12 @@ def _find_employees_exact(lines):
     return None
 
 
-def parse_manager_holding(pdf_path):
-    """解析 PDF，返回基金经理持有信息；未找到返回 None"""
+def parse_manager_holding(pdf_path, share_class=None):
+    """解析 PDF，返回基金经理持有信息；未找到返回 None。
+
+    share_class：查询代码所属份额级别（如 'A'/'C'，来自基金简称末尾字母），
+    多级别披露的报表取该级别的行；None 或该级别行缺失时取合计。
+    """
     best = None  # 只有从业人员数据时也保留（经理区间可能以文字表述漏检）
     with pdfplumber.open(pdf_path) as pdf:
         pages = pdf.pages
@@ -141,16 +185,20 @@ def parse_manager_holding(pdf_path):
             for idx, line in enumerate(lines):
                 if _HEADING_PAT.search(line) and not _TOC_LINE.search(line):
                     window = lines[idx:] + nxt
-                    mgr = _find_manager_line(window)
+                    mgr = _find_manager_line(window, share_class)
                     emp = _find_employees_exact(window)
                     if mgr:
-                        return {
-                            "manager_range": mgr[0],
-                            "manager_line": mgr[1],
+                        val, mline, cmap = mgr
+                        out = {
+                            "manager_range": val,
+                            "manager_line": mline,
                             "employees_exact": emp,
                             "page": i + 1,
                             "snippet": "\n".join(window[:18]),
                         }
+                        if cmap and len(cmap) > 1:
+                            out["manager_ranges"] = cmap
+                        return out
                     if emp and best is None:
                         best = {
                             "manager_range": "",
@@ -174,7 +222,7 @@ def format_range(val):
     return f"{v}万份"
 
 
-_CACHE_VER = 7  # 解析/缓存策略变更时 +1，让旧缓存自动失效
+_CACHE_VER = 8  # 解析/缓存策略变更时 +1，让旧缓存自动失效
 
 # 区间档位：经理持有是区间披露，档位有序，用于两期对比
 _RANK = {"0": 0, "0-10": 1, "10-50": 2, "50-100": 3, ">100": 4}
@@ -212,11 +260,23 @@ def _periodic_reports(notices):
     ]
 
 
-def _parse_report(client, rep):
-    """下载并解析单份定期报告（按公告ID永久缓存）。rep：公告列表项。"""
+def _share_class(client, code):
+    """查询代码所属份额级别：基金简称末尾的大写字母（如 XX混合A -> 'A'）。
+    多级别报表按此取对应行；无后缀（单级别基金）返回 None。"""
+    try:
+        name = (client.basic_info(code) or {}).get("SHORTNAME") or ""
+    except FundApiError:
+        return None
+    m = re.search(r"([A-Z])$", name.strip())
+    return m.group(1) if m else None
+
+
+def _parse_report(client, rep, share_class=None):
+    """下载并解析单份定期报告（按 公告ID+份额类别 永久缓存）。rep：公告列表项。"""
     cache = client.cache
     art_code = rep["ID"]
-    parsed = cache.get(f"holding_parse_v{_CACHE_VER}", art_code)
+    cache_key = f"{art_code}_{share_class or 'ALL'}"
+    parsed = cache.get(f"holding_parse_v{_CACHE_VER}", cache_key)
     if parsed is None:
         detail = client.notice_detail(art_code)
         attaches = detail.get("attach_list") or []
@@ -224,7 +284,7 @@ def _parse_report(client, rep):
         if not url:
             raise RuntimeError("公告没有 PDF 附件")
         pdf_path = client.download_pdf(url, f"{art_code}.pdf")
-        parsed = parse_manager_holding(pdf_path) or {}
+        parsed = parse_manager_holding(pdf_path, share_class) or {}
         parsed.setdefault("manager_range", "")
         parsed.setdefault("manager_line", "")
         parsed.setdefault("employees_exact", None)
@@ -233,7 +293,7 @@ def _parse_report(client, rep):
         if not parsed.get("manager_range") and not parsed.get("employees_exact"):
             parsed["parse_failed"] = True
         parsed["pdf_url"] = url
-        cache.set(f"holding_parse_v{_CACHE_VER}", art_code, parsed)
+        cache.set(f"holding_parse_v{_CACHE_VER}", cache_key, parsed)
     return parsed
 
 
@@ -255,7 +315,7 @@ def get_manager_holding(client, code):
             result = {"status": "no_report", "error": "该基金暂无年度报告/中期报告披露"}
         else:
             rep = reports[0]  # 列表本身按发布时间倒序
-            parsed = _parse_report(client, rep)
+            parsed = _parse_report(client, rep, _share_class(client, code))
             result = {
                 "status": "ok",
                 "report_title": rep.get("TITLE", ""),
@@ -282,10 +342,12 @@ def get_manager_holding_history(client, code, n=2):
         return hit
 
     reports = _periodic_reports(client.periodic_notices(code))[:n]
+    share_class = _share_class(client, code)
     result = []
     for rep in reports:
+        parsed = {}
         try:
-            parsed = _parse_report(client, rep)
+            parsed = _parse_report(client, rep, share_class)
             rng = parsed.get("manager_range") or ""
         except FundApiError:
             raise  # 网络错误不缓存
@@ -295,7 +357,7 @@ def get_manager_holding_history(client, code, n=2):
             "report_title": rep.get("TITLE", ""),
             "report_date": rep.get("PUBLISHDATEDesc", ""),
             "manager_range": rng,
-            "pdf_url": (cache.get(f"holding_parse_v{_CACHE_VER}", rep["ID"]) or {}).get("pdf_url", ""),
+            "pdf_url": parsed.get("pdf_url", ""),
             "change": "",
         })
     for i, r in enumerate(result):

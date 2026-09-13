@@ -248,6 +248,9 @@ def render_fund_detail(code, with_holding=None):
             )
             if hold.get("manager_line"):
                 st.text(f"报告原文：{hold['manager_line']}")
+            if hold.get("manager_ranges"):
+                parts = "；".join(f"{k} {format_range(v)}" for k, v in hold["manager_ranges"].items())
+                st.caption(f"各份额级别明细（展示值为查询代码所属级别）：{parts}")
             try:
                 hist = get_manager_holding_history(get_client(), code, HISTORY_N)
             except FundApiError:
