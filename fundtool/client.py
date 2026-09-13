@@ -23,6 +23,9 @@ class EastFundClient:
         self.pdf_dir = os.path.join(cache.base, "pdfs")
         os.makedirs(self.pdf_dir, exist_ok=True)
         self.session = requests.Session()
+        # 数据源均为国内站点（eastmoney/dfcfw）。忽略系统代理：代理软件开启时
+        # 请求经境外节点会被天天基金风控重置连接（ConnectionResetError 10054）
+        self.session.trust_env = False
         self.session.headers.update({"User-Agent": _UA, "Referer": "https://fund.eastmoney.com/"})
         self._last_req = 0.0
 
@@ -35,7 +38,7 @@ class EastFundClient:
 
     def _get(self, url, params=None, timeout=None):
         last_err = None
-        for _ in range(2):
+        for attempt in range(4):
             try:
                 self._throttle()
                 r = self.session.get(url, params=params, timeout=timeout or self.timeout)
@@ -43,7 +46,12 @@ class EastFundClient:
                 return r
             except requests.RequestException as e:
                 last_err = e
-                time.sleep(1.0)
+                # 连接被远端重置（ConnectionResetError 10054）多为风控临时拦截，
+                # 立即重试仍会被重置，需要更长冷却；其他错误用短退避。
+                if isinstance(e, requests.ConnectionError):
+                    time.sleep(5.0 + 5.0 * attempt)
+                else:
+                    time.sleep(1.0 + 2.0 * attempt)
         raise FundApiError(f"请求失败: {url} ({last_err})")
 
     # ---------- 业务接口 ----------
@@ -134,15 +142,12 @@ class EastFundClient:
         dest = os.path.join(self.pdf_dir, filename)
         if os.path.exists(dest) and os.path.getsize(dest) > 10000:
             return dest
-        self._throttle()
-        r = self.session.get(url, timeout=self.timeout * 4)
+        r = self._get(url, timeout=self.timeout * 4)
         if looks_like_challenge(r.content):
             cookies = solve(r.content.decode("utf-8", "replace"))
             for k, v in cookies.items():
                 self.session.cookies.set(k, v, domain="pdf.dfcfw.com")
-            self._throttle()
-            r = self.session.get(url, timeout=self.timeout * 4)
-        r.raise_for_status()
+            r = self._get(url, timeout=self.timeout * 4)
         if not r.content.startswith(b"%PDF"):
             raise FundApiError("下载的内容不是 PDF（反爬挑战未通过）")
         with open(dest, "wb") as f:

@@ -186,7 +186,7 @@ def render_fund_detail(code):
                 for t in tenure
             ]
         )
-        st.dataframe(tdf, width="stretch", hide_index=True)
+        st.table(tdf.style.hide(axis="index"))
 
 
 # 跨分组重复行的底色（半透明琥珀色，深浅主题下都可读）
@@ -209,11 +209,9 @@ def render_group(name, codes, results):
     rows = [results[c] for c in codes if c in results]
     if rows:
         df = pd.DataFrame(rows)
-        if any(c in highlight for c in codes):
-            styler = df.style.apply(_highlight_dup_rows(highlight), axis=1).hide(axis="index")
-            st.dataframe(styler, width="stretch", height=max(220, 40 * len(df)))
-        else:
-            st.dataframe(df, width="stretch", hide_index=True, height=max(220, 40 * len(df)))
+        # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）
+        styler = df.style.apply(_highlight_dup_rows(highlight), axis=1).hide(axis="index")
+        st.table(styler)
         st.download_button(
             "⬇️ 导出本组 CSV",
             df.to_csv(index=False).encode("utf-8-sig"),

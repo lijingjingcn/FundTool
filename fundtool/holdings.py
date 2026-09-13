@@ -11,6 +11,8 @@ import re
 
 import pdfplumber
 
+from .client import FundApiError
+
 # 章节标题锚点（新/旧格式、中报/年报的措辞差异都覆盖）
 _HEADING_PAT = re.compile(
     r"(从业人员持有本(?:开放式)?基金(?:份额总量区间)?的情况"
@@ -172,11 +174,15 @@ def format_range(val):
     return f"{v}万份"
 
 
-_CACHE_VER = 6  # 解析逻辑变更时 +1，让旧缓存自动失效
+_CACHE_VER = 7  # 解析/缓存策略变更时 +1，让旧缓存自动失效
 
 
 def get_manager_holding(client, code):
-    """完整链路：公告列表 -> 最新中报/年报 -> 下载 PDF -> 解析。结果按公告ID永久缓存。"""
+    """完整链路：公告列表 -> 最新中报/年报 -> 下载 PDF -> 解析。结果按公告ID永久缓存。
+
+    只有确定性结果（解析成功/无报告/解析失败）才缓存；网络类错误（FundApiError，
+    如风控重置连接、超时）不缓存，否则一次网络抖动会让该基金 7 天内一直报错。
+    """
     cache = client.cache
     hit = cache.get(f"holding_v{_CACHE_VER}", code, ttl=7 * 86400)
     if hit is not None:
@@ -221,6 +227,8 @@ def get_manager_holding(client, code):
                 "report_date": rep.get("PUBLISHDATEDesc", ""),
                 **parsed,
             }
+    except FundApiError as e:  # 网络类错误：不缓存，下次查询直接重试
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
     except Exception as e:  # noqa: BLE001 —— 任何环节失败都要在界面上给出可读的错误
         result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
     cache.set(f"holding_v{_CACHE_VER}", code, result)

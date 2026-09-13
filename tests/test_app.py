@@ -42,10 +42,11 @@ def click_query(at):
 def overview_dfs(at):
     """只取分组总览表（以“代码”列为特征），排除详情里的任职表等。
 
-    带高亮的总览表是 pandas Styler，取其 .data 拿到底层 DataFrame。
+    总览表用 st.table 渲染（文字可复制）；带高亮时传入 pandas Styler，
+    AppTest 取到的 .value 已是底层 DataFrame。
     """
     out = []
-    for d in at.dataframe:
+    for d in list(at.dataframe) + list(at.table):
         v = d.value
         if hasattr(v, "data"):  # pandas Styler
             v = v.data
