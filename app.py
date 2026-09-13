@@ -77,6 +77,15 @@ def parse_codes(raw: str):
     return out
 
 
+def count_codes(raw: str):
+    """统计输入文本中各基金代码出现的次数（用于组内重复提示）"""
+    codes = re.findall(r"\b\d{6}\b", raw or "")
+    counts = {}
+    for c in codes:
+        counts[c] = counts.get(c, 0) + 1
+    return counts
+
+
 def yi(value, unit="亿"):
     try:
         return f"{float(value) / 1e8:.2f}{unit}"
@@ -180,12 +189,31 @@ def render_fund_detail(code):
         st.dataframe(tdf, width="stretch", hide_index=True)
 
 
+# 跨分组重复行的底色（半透明琥珀色，深浅主题下都可读）
+_DUP_BG = "background-color: rgba(255,170,0,0.32)"
+
+
+def _highlight_dup_rows(dup_codes):
+    def _hl(row):
+        return [_DUP_BG if row["代码"] in dup_codes else ""] * len(row)
+
+    return _hl
+
+
 def render_group(name, codes, results):
-    """一个分组的结果：总览表 + 每只基金详情"""
+    """一个分组的结果：总览表 + 每只基金详情。重复的基金整行高亮。"""
+    dup_codes = st.session_state.get("dup_codes") or set()
+    code_groups = st.session_state.get("code_groups") or {}
+    dup_within = (st.session_state.get("dup_within") or {}).get(name, {})
+    highlight = set(dup_codes) | set(dup_within)
     rows = [results[c] for c in codes if c in results]
     if rows:
         df = pd.DataFrame(rows)
-        st.dataframe(df, width="stretch", hide_index=True, height=max(220, 40 * len(df)))
+        if any(c in highlight for c in codes):
+            styler = df.style.apply(_highlight_dup_rows(highlight), axis=1).hide(axis="index")
+            st.dataframe(styler, width="stretch", height=max(220, 40 * len(df)))
+        else:
+            st.dataframe(df, width="stretch", hide_index=True, height=max(220, 40 * len(df)))
         st.download_button(
             "⬇️ 导出本组 CSV",
             df.to_csv(index=False).encode("utf-8-sig"),
@@ -197,7 +225,13 @@ def render_group(name, codes, results):
         st.caption("该分组没有查询成功的基金")
     for code in codes:
         if code in results:
-            with st.expander(f"{results[code]['名称']}（{code}）"):
+            mark = " 🔁" if code in highlight else ""
+            with st.expander(f"{results[code]['名称']}（{code}）{mark}"):
+                if code in dup_within:
+                    st.caption(f"🔁 该代码在本分组中重复输入了 {dup_within[code]} 次，查询时已合并为一条")
+                if code in dup_codes:
+                    groups_in = "、".join(code_groups.get(code, []))
+                    st.caption(f"🔁 该基金在多个分组中重复出现：{groups_in}")
                 render_fund_detail(code)
 
 
@@ -256,6 +290,20 @@ with st.sidebar:
 # ---------------- 查询 ----------------
 if submitted:
     plan = [(g["name"], parse_codes(g["codes"])) for g in st.session_state.groups]
+    # 统计跨分组重复：同一代码出现在几个分组
+    code_groups = {}
+    for gname, g_codes in plan:
+        for c in g_codes:
+            code_groups.setdefault(c, []).append(gname)
+    st.session_state["dup_codes"] = {c for c, gs in code_groups.items() if len(gs) > 1}
+    st.session_state["code_groups"] = code_groups
+    # 统计组内重复：同一分组里重复输入的代码（查询时仍合并为一条）
+    dup_within = {}
+    for g in st.session_state.groups:
+        repeated = {c: n for c, n in count_codes(g["codes"]).items() if n > 1}
+        if repeated:
+            dup_within[g["name"]] = repeated
+    st.session_state["dup_within"] = dup_within
     all_codes = []
     seen = set()
     for _, codes in plan:
@@ -279,6 +327,20 @@ if submitted:
 # ---------------- 结果展示：分组标签页 ----------------
 results = st.session_state.get("results")
 if results is not None:
+    dup_codes = st.session_state.get("dup_codes") or set()
+    code_groups = st.session_state.get("code_groups") or {}
+    dup_within = st.session_state.get("dup_within") or {}
+    if dup_codes:
+        dup_desc = "、".join(
+            f"`{c}`（{results[c]['名称'] if c in results else ''}）" for c in sorted(dup_codes)
+        )
+        st.warning(f"🔁 以下基金在多个分组中重复出现（表格中以琥珀色高亮显示）：{dup_desc}")
+    if dup_within:
+        desc = "；".join(
+            f"{g}：" + "、".join(f"`{c}`×{n}" for c, n in codes.items())
+            for g, codes in dup_within.items()
+        )
+        st.warning(f"✍️ 以下分组内重复输入的代码已自动合并为一条（同样高亮显示）：{desc}")
     plan = [(n, [c for c in cs if c not in (st.session_state.get("errors") or {})]) for n, cs in st.session_state.get("plan") or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:
