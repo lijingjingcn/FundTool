@@ -19,6 +19,9 @@ from fundtool import EastFundClient, FundApiError, JsonCache, format_range, get_
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 测试通过 FUNDTOOL_DATA_FILE 指向临时文件，避免冒烟测试覆盖真实分组数据
 DATA_FILE = os.environ.get("FUNDTOOL_DATA_FILE") or os.path.join(BASE_DIR, "我的基金.json")
+# 单只基金查询的历史记录（FUNDTOOL_HISTORY_FILE 供测试重定向）
+HISTORY_FILE = os.environ.get("FUNDTOOL_HISTORY_FILE") or os.path.join(BASE_DIR, "查询历史.json")
+HISTORY_MAX = 30  # 最多保留条数
 # 查询不设总量上限：全部代码自动分批处理，批次之间稍作停顿以免请求过密。
 # 首次查询每只需下载解析报告PDF（约2~5秒/只），已查过的走缓存。
 BATCH_SIZE = 30
@@ -59,6 +62,29 @@ def load_groups():
 def save_groups(groups):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({"groups": groups}, f, ensure_ascii=False, indent=2)
+
+
+def load_history():
+    """单只查询历史：[{code,name,ts}]，最新在前"""
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            items = (json.load(f) or {}).get("items") or []
+    except (OSError, ValueError):
+        items = []
+    return [it for it in items if isinstance(it, dict) and it.get("code")]
+
+
+def record_history(code, name):
+    """记录一次查询：该代码移到最前，去重，截断到 HISTORY_MAX"""
+    items = [it for it in load_history() if it.get("code") != code]
+    items.insert(0, {"code": code, "name": name or code, "ts": time.strftime("%Y-%m-%d %H:%M")})
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump({"items": items[:HISTORY_MAX]}, f, ensure_ascii=False, indent=2)
+
+
+def clear_history():
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump({"items": []}, f, ensure_ascii=False, indent=2)
 
 
 if "groups" not in st.session_state:
@@ -146,12 +172,14 @@ def query_all(codes, with_holding, status_box, progress_bar):
     return results, errors, small_nav
 
 
-def render_fund_detail(code):
-    """单只基金的详情（在 expander 内调用）"""
+def render_fund_detail(code, with_holding=None):
+    """单只基金的详情（在 expander 内调用）。with_holding=None 时跟随分组查询的勾选项"""
     info = get_client().basic_info(code)
     if info is None:
         st.warning("基本信息不可用")
         return
+    if with_holding is None:
+        with_holding = st.session_state.get("with_holding")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("单位净值", info.get("DWJZ", "--"), f"{info.get('RZDF', '--')}%（{info.get('FSRQ', '--')}）")
     c2.metric("净资产规模", yi(info.get("ENDNAV")))
@@ -173,7 +201,7 @@ def render_fund_detail(code):
         f"- **最大回撤(近1年)**：{info.get('MAXRETRA1', '--')}%\n"
         f"- [查看基金档案 ↗](https://fundf10.eastmoney.com/{code}.html)"
     )
-    if st.session_state.get("with_holding"):
+    if with_holding:
         st.markdown("**基金经理持有本基金（来自定期报告）**")
         hold = get_manager_holding(get_client(), code)
         if hold["status"] == "ok":
@@ -333,6 +361,69 @@ with st.sidebar:
         "一年最多更新两次（中报 8 月底前、年报次年 3 月底前）\n\n"
         "查询结果缓存于 `.cache/`，基本信息 12 小时、持有份额 7 天后自动刷新"
     )
+
+# ---------------- 单只基金查询（代码或名称，带历史记录） ----------------
+def _pick_fund(code, name=""):
+    """选定一只基金查看详情并记入历史"""
+    st.session_state["single_result_code"] = code
+    st.session_state["search_matches"] = None
+    record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
+
+
+st.subheader("🔍 单只基金查询")
+_sq, _sgo = st.columns([4, 1])
+_kw = _sq.text_input("基金代码或名称", key="single_q",
+                     placeholder="输入 6 位基金代码（如 005827）或基金名称关键词（如 蓝筹精选）",
+                     label_visibility="collapsed")
+if _sgo.button("🔍 查询", key="single_go", width="stretch"):
+    kw = _kw.strip()
+    if not kw:
+        st.warning("请输入基金代码或名称关键词")
+    elif re.fullmatch(r"\d{6}", kw):
+        _pick_fund(kw)
+    else:
+        st.session_state["single_result_code"] = None
+        st.session_state["search_matches"] = get_client().search_funds(kw)
+
+_matches = st.session_state.get("search_matches")
+if _matches is not None:
+    if not _matches:
+        st.info("没有匹配的基金，换个关键词试试（建议用简称里的两三个字）")
+        st.session_state["search_matches"] = None
+    else:
+        mdict = {m["code"]: m for m in _matches}
+        _sel = st.selectbox(
+            f"匹配到 {len(_matches)} 只基金，请选择",
+            options=list(mdict),
+            format_func=lambda c: f"{mdict[c]['name']}（{c}）{mdict[c]['type']}",
+            key="single_sel",
+        )
+        if st.button("查看该基金", key="single_view", type="primary"):
+            _pick_fund(_sel, mdict[_sel]["name"])
+
+_scode = st.session_state.get("single_result_code")
+if _scode:
+    _sinfo = get_client().basic_info(_scode)
+    if _sinfo is None:
+        st.error(f"未找到基金 {_scode}（代码不存在或已清盘）")
+    else:
+        st.success(f"**{_sinfo.get('SHORTNAME')}**（{_scode}）· {_sinfo.get('FTYPE', '')} · {_sinfo.get('JJGS', '')}")
+        with st.expander("基金详情", expanded=True):
+            render_fund_detail(_scode, with_holding=True)
+
+_hist = load_history()
+if _hist:
+    st.caption("🕘 最近查询（点击再次查看）")
+    _hcols = st.columns(4)
+    for _i, _h in enumerate(_hist[:12]):
+        with _hcols[_i % 4]:
+            st.button(f"{(_h.get('name') or _h['code'])[:10]} {_h['code']}", key=f"hist_{_h['code']}",
+                      on_click=_pick_fund, args=(_h["code"], _h.get("name") or ""), width="stretch")
+    if st.button("清空历史", key="hist_clear"):
+        clear_history()
+        st.rerun()
+st.divider()
+
 
 # ---------------- 查询 ----------------
 if submitted:

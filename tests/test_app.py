@@ -17,7 +17,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 os.environ["FUNDTOOL_DATA_FILE"] = os.path.join(tempfile.mkdtemp(prefix="fundtool_test_"), "我的基金.json")
+os.environ["FUNDTOOL_HISTORY_FILE"] = os.path.join(os.path.dirname(os.environ["FUNDTOOL_DATA_FILE"]), "查询历史.json")
 DATA_FILE = os.environ["FUNDTOOL_DATA_FILE"]
+HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -112,6 +114,39 @@ def main():
     at3.run()
     assert "161725" in at3.text_area[0].value, "排序应持久化到 我的基金.json"
     print("✅ 场景4 通过：分组可上移/下移排序，顺序持久化")
+
+    # ---- 场景5：单只查询——代码直达、经理持有展示、历史记录持久化 ----
+    at4 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at4.run()
+    next(t for t in at4.text_input if t.key == "single_q").set_value("005827").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    assert any("005827" in s.value for s in at4.success), [s.value for s in at4.success]
+    metric_labels = [m.label for m in at4.metric]
+    assert "基金经理持有份额（区间）" in metric_labels, metric_labels
+    with open(HISTORY_FILE, encoding="utf-8") as f:
+        hist = json.load(f)["items"]
+    assert hist and hist[0]["code"] == "005827", hist
+    print("✅ 场景5a 通过：按代码单只查询，详情含经理持有，写入历史")
+
+    # ---- 场景5b：按名称搜索，选择后查看 ----
+    next(t for t in at4.text_input if t.key == "single_q").set_value("蓝筹精选").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    assert len(at4.selectbox) == 1, "名称搜索应出现基金选择框"
+    sb = at4.selectbox[0]
+    assert sb.options, "搜索结果不应为空"
+    pick_code = sb.value  # .value 是 6 位代码；.options 是格式化标签
+    next(b for b in at4.button if b.key == "single_view").click().run()
+    assert pick_code in " ".join(s.value for s in at4.success)
+    print(f"✅ 场景5b 通过：按名称搜索到 {len(sb.options)} 只，选择 {pick_code} 查看成功")
+
+    # ---- 场景5c：历史记录跨会话保留，点击可直接再查 ----
+    at5 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at5.run()
+    chip = next((b for b in at5.button if b.key == "hist_005827"), None)
+    assert chip is not None, "新会话应显示历史记录按钮"
+    chip.click().run()
+    assert any("005827" in s.value for s in at5.success)
+    print("✅ 场景5c 通过：历史跨会话保留，点击即查")
 
     print("\n全部冒烟测试通过 🎉")
 

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、定期报告公告、报告 PDF 下载"""
+"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、定期报告公告、报告 PDF 下载、基金搜索"""
 import os
+import re
 import time
 
 import requests
@@ -75,6 +76,29 @@ class EastFundClient:
             return None
         self.cache.set("basic", code, datas)
         return datas
+
+    def search_funds(self, keyword):
+        """按名称关键词搜索基金（天天基金搜索建议接口）。返回 [{code,name,type}]，按相关度排序"""
+        cached = self.cache.get("search", keyword, ttl=7 * 86400)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx",
+            params={"m": 1, "key": keyword},
+        )
+        out, seen = [], set()
+        for item in (r.json() or {}).get("Datas") or []:
+            code = item.get("CODE") or ""
+            if not re.fullmatch(r"\d{6}", code) or code in seen:
+                continue
+            base = item.get("FundBaseInfo") or {}
+            seen.add(code)
+            out.append({"code": code, "name": base.get("SHORTNAME") or item.get("NAME") or code,
+                        "type": base.get("FTYPE") or ""})
+            if len(out) >= 20:
+                break
+        self.cache.set("search", keyword, out)
+        return out
 
     def manager_tenure(self, code):
         """基金经理任职记录（现任+离任）。该接口为附加信息，失败不致命。"""
