@@ -16,6 +16,27 @@ class FundApiError(Exception):
     pass
 
 
+def _search_rel_rank(name, kw):
+    """搜索结果相关度：精确匹配 > 名称以关键词开头 > 与关键词公共前缀≥4字 > 包含关键词 > 其他。
+    接口自身的排序按词频覆盖度，常把"中欧创新成长灵活配置"排到"华商创新成长"前面。"""
+    if name == kw:
+        return 0
+    if name.startswith(kw):
+        return 1
+    if kw.startswith(name):
+        return 2
+    p = 0
+    for a, b in zip(name, kw):
+        if a != b:
+            break
+        p += 1
+    if p >= 4:
+        return 3
+    if kw in name:
+        return 4
+    return 5
+
+
 class EastFundClient:
     def __init__(self, cache, rate_limit=0.25, timeout=20):
         self.cache = cache
@@ -79,7 +100,7 @@ class EastFundClient:
 
     def search_funds(self, keyword):
         """按名称关键词搜索基金（天天基金搜索建议接口）。返回 [{code,name,type}]，按相关度排序"""
-        cached = self.cache.get("search", keyword, ttl=7 * 86400)
+        cached = self.cache.get("search_v2", keyword, ttl=7 * 86400)
         if cached is not None:
             return cached
         r = self._get(
@@ -97,7 +118,9 @@ class EastFundClient:
                         "type": base.get("FTYPE") or ""})
             if len(out) >= 20:
                 break
-        self.cache.set("search", keyword, out)
+        # 接口排序不可靠（见 _search_rel_rank），按名称相关度重排；稳定排序保留组内原顺序
+        out.sort(key=lambda m: _search_rel_rank(m["name"], keyword))
+        self.cache.set("search_v2", keyword, out)
         return out
 
     def manager_tenure(self, code):

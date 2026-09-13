@@ -156,6 +156,15 @@ def main():
     assert any("005827" in s.value for s in at5.success)
     print("✅ 场景5c 通过：历史跨会话保留，点击即查")
 
+    # ---- 场景5d：搜索相关度重排——输入含多余后缀时，正确基金应排第一 ----
+    # 官方简称"华商创新成长混合发起式A"不含"灵活配置"，接口原始排序会把
+    # 中欧创新成长灵活配置排在前面；重排后目标基金应默认选中
+    next(t for t in at4.text_input if t.key == "single_q").set_value("华商创新成长灵活配置").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    assert at4.selectbox, "应出现基金选择框"
+    assert at4.selectbox[0].value == "000541", f"应为华商创新成长，实际 {at4.selectbox[0].value}"
+    print("✅ 场景5d 通过：搜索重排后华商创新成长（000541）排第一")
+
     print("\n全部冒烟测试通过 🎉")
 
 
