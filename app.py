@@ -149,8 +149,9 @@ def _fmt_change(chg):
 
 
 def query_all(codes, with_holding, status_box, progress_bar):
-    """逐只查询，自动分批直到全部完成。返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}"""
-    results, errors, small_nav = {}, {}, {}
+    """逐只查询，自动分批直到全部完成。
+    返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}、{代码: 持有变化（升N档/降N档）}"""
+    results, errors, small_nav, chg_map = {}, {}, {}, {}
     total = len(codes)
     n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
     for i, code in enumerate(codes):
@@ -189,12 +190,14 @@ def query_all(codes, with_holding, status_box, progress_bar):
                 except FundApiError:
                     chg = ""
                 row["持有较上期"] = _fmt_change(chg)
+                if chg and chg != "持平":
+                    chg_map[code] = chg
             results[code] = row
         except FundApiError as e:
             errors[code] = str(e)
         status_box.update(label=f"正在查询第 {i + 1}/{total} 只（第 {i // BATCH_SIZE + 1}/{n_batches} 批）")
         progress_bar.progress((i + 1) / total, text=f"查询进度 {i + 1}/{total}（共 {n_batches} 批）")
-    return results, errors, small_nav
+    return results, errors, small_nav, chg_map
 
 
 def render_fund_detail(code, with_holding=None):
@@ -261,7 +264,7 @@ def render_fund_detail(code, with_holding=None):
                         for h in hist
                     ]
                 )
-                st.table(hdf.style.hide(axis="index"))
+                st.table(hdf.style.apply(_highlight_changes, axis=0).hide(axis="index"))
         else:
             st.warning(f"未能获取：{hold.get('error')}")
     tenure = get_client().manager_tenure(code)
@@ -281,6 +284,9 @@ def render_fund_detail(code, with_holding=None):
 _DUP_BG = "background-color: rgba(255,170,0,0.32)"
 # 迷你基金（净资产<0.5亿）规模单元格的底色（半透明红色）
 _SMALL_BG = "background-color: rgba(229,57,53,0.45)"
+# 经理持有份额变化：升档绿色 / 降档红色
+_CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
+_CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
 
 
 def _highlight_dup_rows(dup_codes):
@@ -301,6 +307,17 @@ def _highlight_small_scale(small_codes, codes):
     return _hl
 
 
+def _highlight_changes(col):
+    """持有变化列（总览「持有较上期」/ 详情「较上期」）单元格着色：↑绿 ↓红"""
+    if col.name not in ("持有较上期", "较上期"):
+        return [""] * len(col)
+    out = []
+    for v in col:
+        v = str(v)
+        out.append(_CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else "")
+    return out
+
+
 def render_group(name, codes, results):
     """一个分组的结果：总览表 + 每只基金详情。重复的基金整行高亮。"""
     dup_codes = st.session_state.get("dup_codes") or set()
@@ -316,6 +333,8 @@ def render_group(name, codes, results):
         styler = df.style.apply(_highlight_dup_rows(highlight), axis=1)
         if small_here:
             styler = styler.apply(_highlight_small_scale(small_here, df["代码"]), axis=0)
+        if "持有较上期" in df.columns:
+            styler = styler.apply(_highlight_changes, axis=0)
         st.table(styler.hide(axis="index"))
         st.download_button(
             "⬇️ 导出本组 CSV",
@@ -496,12 +515,13 @@ if submitted:
     else:
         with st.status(f"正在查询 {len(all_codes)} 只基金（自动分批，每批 {BATCH_SIZE} 只）…", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="准备查询…")
-            results, errors, small_nav = query_all(all_codes, with_holding, status_box, progress_bar)
+            results, errors, small_nav, chg_map = query_all(all_codes, with_holding, status_box, progress_bar)
             progress_bar.empty()
             status_box.update(label="查询完成", state="complete", expanded=False)
         st.session_state["results"] = results
         st.session_state["errors"] = errors
         st.session_state["small_nav"] = small_nav
+        st.session_state["holding_chg"] = chg_map
         st.session_state["plan"] = plan
         st.session_state["with_holding"] = with_holding
 
@@ -530,6 +550,16 @@ if results is not None:
         )
         if small_desc:
             st.error(f"⚠️ 以下 {len(small_nav)} 只基金净资产低于 0.5 亿（迷你基金，规模单元格红色高亮，注意清盘风险）：{small_desc}")
+    chg_map = st.session_state.get("holding_chg") or {}
+    if chg_map:
+        downs = {c: v for c, v in chg_map.items() if v.startswith("降") and c in results}
+        ups = {c: v for c, v in chg_map.items() if v.startswith("升") and c in results}
+        if downs:
+            desc = "、".join(f"{results[c]['名称']}（`{c}`，↓{v[1:]}）" for c, v in downs.items())
+            st.warning(f"📉 以下 {len(downs)} 只基金的经理**减持**了本基金（较上一份中报/年报，单元格红色高亮）：{desc}")
+        if ups:
+            desc = "、".join(f"{results[c]['名称']}（`{c}`，↑{v[1:]}）" for c, v in ups.items())
+            st.success(f"📈 以下 {len(ups)} 只基金的经理**增持**了本基金（较上一份中报/年报，单元格绿色高亮）：{desc}")
     plan = [(n, [c for c in cs if c not in (st.session_state.get("errors") or {})]) for n, cs in st.session_state.get("plan") or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:
