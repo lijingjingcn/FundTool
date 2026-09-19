@@ -25,6 +25,10 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from fundtool.holdings import range_change  # noqa: E402
 
+# 多页应用：入口只做导航，各页面脚本可独立运行（AppTest 直接跑页面脚本）
+GROUPS_PAGE = os.path.join(ROOT, "ui", "page_groups.py")
+SINGLE_PAGE = os.path.join(ROOT, "ui", "page_single.py")
+
 
 def write_groups(groups):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -55,7 +59,7 @@ def overview_dfs(at):
 def main():
     write_groups([{"id": "test0001", "name": "我的基金", "codes": ""}])
     # ---- 场景1：默认单分组，输入并查询；005827 组内重复应提示合并 ----
-    at = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at.run()
     assert len(at.text_area) == 1, "默认应有 1 个分组输入框"
     at.text_area[0].set_value("005827 005827 999999").run()
@@ -113,7 +117,7 @@ def main():
     print("✅ 场景2 通过：两个分组各自出表，跨组重复有提醒")
 
     # ---- 场景3：持久化——全新会话（模拟下次启动）免输入直接查询 ----
-    at2 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at2 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at2.run()
     assert len(at2.text_area) == 2, "分组数应从 我的基金.json 恢复"
     assert "161725" in at2.text_area[1].value, at2.text_area[1].value
@@ -129,13 +133,13 @@ def main():
     down_btn.click().run()
     assert "161725" in at2.text_area[0].value, at2.text_area[0].value
     assert "010790" in at2.text_area[1].value, at2.text_area[1].value
-    at3 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at3 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at3.run()
     assert "161725" in at3.text_area[0].value, "排序应持久化到 我的基金.json"
     print("✅ 场景4 通过：分组可上移/下移排序，顺序持久化")
 
     # ---- 场景5：单只查询——代码直达、经理持有展示、历史记录持久化 ----
-    at4 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at4 = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
     at4.run()
     next(t for t in at4.text_input if t.key == "single_q").set_value("005827").run()
     next(b for b in at4.button if b.key == "single_go").click().run()
@@ -159,7 +163,7 @@ def main():
     print(f"✅ 场景5b 通过：按名称搜索到 {len(sb.options)} 只，选择 {pick_code} 查看成功")
 
     # ---- 场景5c：历史记录跨会话保留，点击可直接再查 ----
-    at5 = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=180)
+    at5 = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
     at5.run()
     chip = next((b for b in at5.button if b.key == "hist_005827"), None)
     assert chip is not None, "新会话应显示历史记录按钮"
