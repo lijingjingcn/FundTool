@@ -90,7 +90,7 @@ with st.sidebar:
         "- 基金规模：最新披露的期末净资产\n"
         "- 经理持有份额：定期报告披露的区间（万份），"
         "一年最多更新两次（中报 8 月底前、年报次年 3 月底前）\n"
-        "- 经理变更：近半年有新任/离任时，基金经理单元格琥珀色提示\n\n"
+        "- 经理变更：近一年有新任/离任时，基金经理单元格琥珀色提示\n\n"
         "查询结果缓存于 `.cache/`，基本信息 12 小时、持有份额 7 天后自动刷新"
     )
 
@@ -173,7 +173,7 @@ if results is not None:
         hit = {c: v for c, v in mgr_change.items() if c in results}
         if hit:
             desc = "、".join(f"{results[c]['名称']}（`{c}`，{v}）" for c, v in hit.items())
-            st.warning(f"🔁 以下 {len(hit)} 只基金**近半年基金经理有变更**（基金经理单元格琥珀色高亮）：{desc}")
+            st.warning(f"🔁 以下 {len(hit)} 只基金**近一年基金经理有变更**（基金经理单元格琥珀色高亮）：{desc}")
     plan = [(n, [c for c in cs if c not in (st.session_state.get("errors") or {})]) for n, cs in st.session_state.get("plan") or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:

@@ -34,12 +34,12 @@ BATCH_PAUSE = 8  # 批间停顿秒数
 SMALL_NAV_YUAN = 0.5e8
 # 经理持有份额对比的报告期数：2 = 当前期报 + 上一份中报/年报
 HISTORY_N = 2
-# 经理变更提示窗口（天）：近半年内有新任/离任时，基金经理单元格琥珀色提示
-MGR_CHANGE_DAYS = 183
+# 经理变更提示窗口（天）：近一年内有新任/离任时，基金经理单元格琥珀色提示
+MGR_CHANGE_DAYS = 365
 
 
 def _mgr_change_label(tenure_rows):
-    """近半年基金经理变更：'新任' / '离任' / '新任+离任'，无变更返回 ''。
+    """近一年基金经理变更：'新任' / '离任' / '新任+离任'，无变更返回 ''。
     新任 = 现任经理的上任日期在窗口内；离任 = 有经理的离任日期在窗口内。"""
     threshold = datetime.date.today() - datetime.timedelta(days=MGR_CHANGE_DAYS)
     new = left = False
@@ -196,7 +196,7 @@ def fund_overview_row(code, with_holding):
             row["基金经理持有本基金"] = "--"
             row["持有数据来源"] = "获取失败"
     row["持有较上期"] = _fmt_change(chg)
-    # 近半年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
+    # 近一年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
     mgr_chg = _mgr_change_label(get_client().manager_tenure(code))
     return row, small, chg, mgr_chg
 
@@ -306,7 +306,7 @@ def render_fund_detail(code, with_holding=None):
         st.markdown("**基金经理任职情况**")
         _mcl = _mgr_change_label(tenure)
         if _mcl:
-            st.caption(f"🔁 近半年基金经理有变更：{_mcl}（基金经理单元格已琥珀色提示）")
+            st.caption(f"🔁 近一年基金经理有变更：{_mcl}（基金经理单元格已琥珀色提示）")
         tdf = pd.DataFrame(
             [
                 {"基金经理": "、".join(t["managers"]), "起始": t["start"], "截止": t["end"],
@@ -325,12 +325,12 @@ _SMALL_BG = "background-color: rgba(229,57,53,0.45)"
 # 经理持有份额变化：升档绿色 / 降档红色
 _CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
 _CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
-# 近半年基金经理变更：基金经理单元格琥珀色
+# 近一年基金经理变更：基金经理单元格琥珀色
 _MGRCHG_BG = "background-color: rgba(255,170,0,0.45)"
 
 
 def _highlight_mgr_change(changed_codes, codes):
-    """基金经理列按行高亮：近半年经理有变更的行，基金经理单元格上底色"""
+    """基金经理列按行高亮：近一年经理有变更的行，基金经理单元格上底色"""
 
     def _hl(col):
         if col.name != "基金经理":

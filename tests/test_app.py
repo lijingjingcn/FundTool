@@ -85,10 +85,10 @@ def main():
     assert range_change(">100", "10-50") == "升2档" and range_change("10-50", ">100") == "降2档" and range_change("10-50", "10-50") == "持平" and range_change(">100", "") is None
     warn_texts = [w.value for w in at.warning]
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
-    # 近半年经理变更提示（005827 于 2026-05-23 新增共管经理，窗口半年内应有提示；窗口过后跳过）
+    # 近一年经理变更提示（005827 于 2026-05-23 新增共管经理，窗口一年内应有提示；窗口过后跳过）
     _chg_lbl = _mgr_change_label(get_client().manager_tenure("005827"))
     if _chg_lbl:
-        assert any("近半年基金经理有变更" in w and "005827" in w for w in warn_texts), warn_texts
+        assert any("近一年基金经理有变更" in w and "005827" in w for w in warn_texts), warn_texts
     print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示"
           + (f" + 经理变更提示（{_chg_lbl}）" if _chg_lbl else ""))
 

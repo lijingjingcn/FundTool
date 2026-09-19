@@ -120,7 +120,7 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                          title="fund_table.csv") -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
     small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
-    mgr_change_codes：近半年经理有变更的代码集合，其「基金经理」单元格标琥珀色。"""
+    mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色。"""
     small_codes = set(small_codes or ())
     mgr_change_codes = set(mgr_change_codes or ())
     cols = list(df.columns)
