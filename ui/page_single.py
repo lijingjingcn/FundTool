@@ -10,8 +10,6 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool import FundApiError  # noqa: E402
 from ui.common import (  # noqa: E402
-    _highlight_changes,
-    _highlight_small_scale,
     clear_history,
     fund_overview_row,
     get_client,
@@ -19,6 +17,7 @@ from ui.common import (  # noqa: E402
     record_history,
     render_fund_detail,
 )
+from ui.sortable_table import render_sortable_table  # noqa: E402
 
 st.title("🔍 单只 / 经理查询")
 st.caption("输入 6 位基金代码、基金名称关键词或基金经理姓名，按回车或点「🔍 查询」。数据来自天天基金公开数据与基金定期报告，仅供参考。")
@@ -106,7 +105,7 @@ if _mv:
         f"现任基金 {len(_mv['codes'])} 只 · 在管总规模 {_mv['scale']} · "
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {_mv['best_return']}"
     )
-    # 与分组总览同一套列与高亮：含基金经理持有本基金、持有较上期
+    # 与分组总览同一套列：含基金经理持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位）
     rows, small_here = [], set()
     with st.status(f"正在查询 {_mv['name']} 在管的 {len(_mv['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):
@@ -124,19 +123,9 @@ if _mv:
                     small_here.add(_code)
             rows.append(row)
         _mst.update(label="查询完成", state="complete", expanded=False)
-    _mvdf = pd.DataFrame(rows)
-    _styler = _mvdf.style.hide(axis="index")
-    if small_here:
-        _styler = _styler.apply(_highlight_small_scale(small_here, _mvdf["代码"]), axis=0)
-    _styler = _styler.apply(_highlight_changes, axis=0)
-    st.table(_styler)
-    st.download_button(
-        "⬇️ 导出 CSV",
-        _mvdf.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"基金信息-经理{_mv['name']}.csv",
-        mime="text/csv",
-        key=f"mgrcsv_{_mv['id']}",
-    )
+    st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
+    render_sortable_table(pd.DataFrame(rows), small_codes=small_here,
+                           title=f"基金信息-经理{_mv['name']}.csv")
     st.caption("点击基金查看完整详情（含基金经理持有份额）")
     _mvcols = st.columns(4)
     for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):

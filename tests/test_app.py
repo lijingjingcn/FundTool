@@ -24,6 +24,10 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from fundtool.holdings import range_change  # noqa: E402
+from ui.common import fund_overview_row  # noqa: E402
+from ui.sortable_table import sortable_table_html  # noqa: E402
+
+import pandas as pd  # noqa: E402
 
 # 多页应用：入口只做导航，各页面脚本可独立运行（AppTest 直接跑页面脚本）
 GROUPS_PAGE = os.path.join(ROOT, "ui", "page_groups.py")
@@ -180,24 +184,31 @@ def main():
     assert at4.selectbox[0].value == "000541", f"应为华商创新成长，实际 {at4.selectbox[0].value}"
     print("✅ 场景5d 通过：搜索重排后华商创新成长（000541）排第一")
 
-    # ---- 场景5e：按基金经理姓名搜索 → 其管理的基金列表 → 点击基金出详情 ----
+    # ---- 场景5e：按基金经理姓名搜索 → 经理视图（可点表头排序）→ 点击基金出详情 ----
     next(t for t in at4.text_input if t.key == "single_q").set_value("张坤").run()
     next(b for b in at4.button if b.key == "single_go").click().run()
     mgr_btn = next((b for b in at4.button if b.key == "mgr_30189744"), None)
     assert mgr_btn is not None, f"应出现张坤（易方达基金）的经理卡片，实际 {[b.key for b in at4.button]}"
     mgr_btn.click().run()
-    tables = [t.value.data if hasattr(t.value, "data") else t.value for t in at4.table]
-    mv = [v for v in tables if hasattr(v, "columns") and "005827" in list(v.get("代码", []))]
-    assert mv, "张坤的现任基金表应包含 005827"
-    mdf = mv[0]
-    # 经理基金列表与分组总览同一套列：持有份额 + 较上期
-    assert "基金经理持有本基金" in mdf.columns and "持有较上期" in mdf.columns, list(mdf.columns)
-    mrow = mdf[mdf["代码"] == "005827"].iloc[0]
-    assert mrow["基金经理持有本基金"] == ">100万份", mrow["基金经理持有本基金"]
-    assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", mrow["持有较上期"]), mrow["持有较上期"]
+    # 表格渲染为内嵌组件（iframe），AppTest 不可见；用渲染提示与基金按钮确认经理视图已出
+    assert any("点击表头排序" in c.value for c in at4.caption), [c.value for c in at4.caption]
+    next(b for b in at4.button if b.key == "mvfund_005827")
     next(b for b in at4.button if b.key == "mvfund_005827").click().run()
     assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
-    print("✅ 场景5e 通过：按经理姓名「张坤」搜到在管基金，总览含经理持有与较上期，点击可查详情")
+
+    # ---- 场景5f：可排序表格的语义排序键与高亮（纯函数直测） ----
+    row, _small, _chg = fund_overview_row("005827", with_holding=True)
+    assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
+    fake = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模(净资产)": "0.30亿 ⚠️",
+            "规模日期": "--", "净值日期": "--", "基金经理持有本基金": "--", "持有数据来源": "--", "持有较上期": "↓2档"}
+    h = sortable_table_html(pd.DataFrame([row, fake]), small_codes={"999999"})
+    assert 'data-sort="204.16"' in h, "规模应转成数值排序键"
+    assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
+    assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
+    assert 'td class="small"' in h, "迷你基金规模单元格应标红"
+    assert h.count("<tr>") == 3, "表头行 + 2 数据行"
+    assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
+    print("✅ 场景5e/5f 通过：经理视图可点表头排序（含 CSV 导出），语义排序键与高亮正确")
 
     print("\n全部冒烟测试通过 🎉")
 
