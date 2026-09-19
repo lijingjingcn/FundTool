@@ -435,11 +435,14 @@ def _pick_fund(code, name=""):
 
 
 st.subheader("🔍 单只基金查询")
-_sq, _sgo = st.columns([4, 1])
-_kw = _sq.text_input("基金代码或名称", key="single_q",
-                     placeholder="输入 6 位基金代码（如 005827）或基金名称关键词（如 蓝筹精选）",
-                     label_visibility="collapsed")
-if _sgo.button("🔍 查询", key="single_go", width="stretch"):
+# 表单内的文本框按「回车」即提交，与点「🔍 查询」按钮等效
+with st.form("single_form"):
+    _sq, _sgo = st.columns([4, 1])
+    _kw = _sq.text_input("基金代码或名称", key="single_q",
+                         placeholder="输入 6 位基金代码（如 005827）或基金名称关键词（如 蓝筹精选），回车即查",
+                         label_visibility="collapsed")
+    _go = _sgo.form_submit_button("🔍 查询", key="single_go", width="stretch")
+if _go:
     kw = _kw.strip()
     if not kw:
         st.warning("请输入基金代码或名称关键词")
