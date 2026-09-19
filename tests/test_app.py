@@ -24,7 +24,7 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from fundtool.holdings import range_change  # noqa: E402
-from ui.common import fund_overview_row, get_client  # noqa: E402
+from ui.common import _mgr_change_label, fund_overview_row, get_client  # noqa: E402
 from ui.sortable_table import sortable_table_html  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -85,7 +85,12 @@ def main():
     assert range_change(">100", "10-50") == "升2档" and range_change("10-50", ">100") == "降2档" and range_change("10-50", "10-50") == "持平" and range_change(">100", "") is None
     warn_texts = [w.value for w in at.warning]
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
-    print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示")
+    # 近半年经理变更提示（005827 于 2026-05-23 新增共管经理，窗口半年内应有提示；窗口过后跳过）
+    _chg_lbl = _mgr_change_label(get_client().manager_tenure("005827"))
+    if _chg_lbl:
+        assert any("近半年基金经理有变更" in w and "005827" in w for w in warn_texts), warn_texts
+    print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示"
+          + (f" + 经理变更提示（{_chg_lbl}）" if _chg_lbl else ""))
 
     # ---- 场景1b：多级别（A/C 份额）报表按查询代码的份额级别取行 ----
     # 010790 是 A 类代码：经理 A 类 >100、C 类 0、合计 >100 → 应显示 A 行 >100
@@ -208,7 +213,12 @@ def main():
         f"杨思亮的基金按钮应存在，实际 {[b.key for b in at4.button if b.key and b.key.startswith('mvfund_')]}"
     # 共管基金（005827 两人都在管）不会因 key 冲突报错，且两位各有一份
     assert sum("点击表头排序" in c.value for c in at4.caption) >= 2, "两位经理各应有一个排序表"
-    print("✅ 场景5g 通过：一次输入张坤+杨思亮，两位经理分块展示在管基金（共管基金无冲突）")
+    # 从经理分块点基金：详情就地显示在该分块内（而不是长页面底部）
+    yang_codes = get_client().search_managers("杨思亮")[0]["codes"]
+    assert "005827" in yang_codes
+    next(b for b in at4.button if b.key == f"mvfund_{yang_id}_005827").click().run()
+    assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
+    print("✅ 场景5g 通过：多位经理分块展示；分块内点基金详情就地显示（共管基金无冲突）")
 
     # ---- 场景5h：同名经理提示（目录中 吴昊 6 位、李博 3 位重名） ----
     next(t for t in at4.text_input if t.key == "single_q").set_value("吴昊").run()
@@ -225,7 +235,7 @@ def main():
     print("✅ 场景5h(多人) 通过：多经理查询中「李博」3 位同名同样有提示")
 
     # ---- 场景5f：可排序表格的语义排序键与高亮（纯函数直测） ----
-    row, _small, _chg = fund_overview_row("005827", with_holding=True)
+    row, _small, _chg, _mchg = fund_overview_row("005827", with_holding=True)
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
     fake = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模(净资产)": "0.30亿 ⚠️",
             "规模日期": "--", "净值日期": "--", "基金经理持有本基金": "--", "持有数据来源": "--", "持有较上期": "↓2档"}
@@ -236,9 +246,23 @@ def main():
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"
     assert h.count("<tr>") == 3, "表头行 + 2 数据行"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
-    assert "tr:hover td:not(.small):not(.up):not(.down)" in h and "tr:hover td {" not in h, \
-        "行悬停底色不得覆盖红/绿高亮单元格"
-    print("✅ 场景5f 通过：可排序表格语义排序键与高亮正确")
+    assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
+        "行悬停底色不得覆盖红/绿/琥珀高亮单元格"
+    assert 'td class="mgrchg"' in sortable_table_html(
+        pd.DataFrame([row]), mgr_change_codes={"005827"}), "经理变更的基金经理单元格应标琥珀色"
+    # 经理变更判定：新任/离任/组合/无变更
+    import datetime as _dt
+    _today = _dt.date.today()
+    _d = lambda n: str(_today - _dt.timedelta(days=n))  # noqa: E731
+    assert _mgr_change_label([{"start": _d(30), "end": "至今"}]) == "新任"
+    assert _mgr_change_label([{"start": _d(400), "end": _d(20)}]) == "离任"
+    assert _mgr_change_label([{"start": _d(400), "end": "至今"},
+                              {"start": _d(500), "end": _d(10)}]) == "离任"
+    assert _mgr_change_label([{"start": _d(15), "end": "至今"},
+                              {"start": _d(500), "end": _d(20)}]) == "新任+离任"
+    assert _mgr_change_label([{"start": _d(400), "end": "至今"}]) == ""
+    assert _mgr_change_label([]) == ""
+    print("✅ 场景5f 通过：可排序表格语义排序键/高亮与经理变更判定正确")
 
     print("\n全部冒烟测试通过 🎉")
 

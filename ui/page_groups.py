@@ -89,7 +89,8 @@ with st.sidebar:
         "**数据口径说明**\n\n"
         "- 基金规模：最新披露的期末净资产\n"
         "- 经理持有份额：定期报告披露的区间（万份），"
-        "一年最多更新两次（中报 8 月底前、年报次年 3 月底前）\n\n"
+        "一年最多更新两次（中报 8 月底前、年报次年 3 月底前）\n"
+        "- 经理变更：近半年有新任/离任时，基金经理单元格琥珀色提示\n\n"
         "查询结果缓存于 `.cache/`，基本信息 12 小时、持有份额 7 天后自动刷新"
     )
 
@@ -122,13 +123,14 @@ if submitted:
     else:
         with st.status(f"正在查询 {len(all_codes)} 只基金（自动分批，每批 {BATCH_SIZE} 只）…", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="准备查询…")
-            results, errors, small_nav, chg_map = query_all(all_codes, with_holding, status_box, progress_bar)
+            results, errors, small_nav, chg_map, mgr_change = query_all(all_codes, with_holding, status_box, progress_bar)
             progress_bar.empty()
             status_box.update(label="查询完成", state="complete", expanded=False)
         st.session_state["results"] = results
         st.session_state["errors"] = errors
         st.session_state["small_nav"] = small_nav
         st.session_state["holding_chg"] = chg_map
+        st.session_state["mgr_change"] = mgr_change
         st.session_state["plan"] = plan
         st.session_state["with_holding"] = with_holding
 
@@ -166,6 +168,12 @@ if results is not None:
         if ups:
             desc = "、".join(f"{results[c]['名称']}（`{c}`，↑{v[1:]}）" for c, v in ups.items())
             st.success(f"📈 以下 {len(ups)} 只基金的经理**增持**了本基金（较上一份中报/年报，单元格绿色高亮）：{desc}")
+    mgr_change = st.session_state.get("mgr_change") or {}
+    if mgr_change:
+        hit = {c: v for c, v in mgr_change.items() if c in results}
+        if hit:
+            desc = "、".join(f"{results[c]['名称']}（`{c}`，{v}）" for c, v in hit.items())
+            st.warning(f"🔁 以下 {len(hit)} 只基金**近半年基金经理有变更**（基金经理单元格琥珀色高亮）：{desc}")
     plan = [(n, [c for c in cs if c not in (st.session_state.get("errors") or {})]) for n, cs in st.session_state.get("plan") or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:

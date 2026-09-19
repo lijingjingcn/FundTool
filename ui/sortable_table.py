@@ -65,8 +65,9 @@ th:hover { background: #e2e7ee; }
 th .arr { display: inline-block; width: 1.1em; color: #5a6b81; font-weight: 400; }
 td { padding: 6px 9px; white-space: nowrap; border-bottom: 1px solid #e6e9ee; color: #26313f; }
 td.small { background: __SMALL__; } td.up { background: __UP__; } td.down { background: __DOWN__; }
-/* 行悬停底色不覆盖高亮单元格（红/绿提示悬停时保持可见） */
-tr:hover td:not(.small):not(.up):not(.down) { background: rgba(120,140,170,0.10); }
+td.mgrchg { background: rgba(255,170,0,0.45); }
+/* 行悬停底色不覆盖高亮单元格（红/绿/琥珀提示悬停时保持可见） */
+tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg) { background: rgba(120,140,170,0.10); }
 @media (prefers-color-scheme: dark) {
   th { background: #212b3b; color: #dbe3ee; border-bottom-color: #364257; }
   th:hover { background: #2a3648; }
@@ -115,10 +116,13 @@ function exportCSV() {
 """
 
 
-def sortable_table_html(df: pd.DataFrame, small_codes=None, title="fund_table.csv") -> str:
+def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
+                         title="fund_table.csv") -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
-    small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红。"""
+    small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
+    mgr_change_codes：近半年经理有变更的代码集合，其「基金经理」单元格标琥珀色。"""
     small_codes = set(small_codes or ())
+    mgr_change_codes = set(mgr_change_codes or ())
     cols = list(df.columns)
     ths = "".join(
         f'<th data-col="{_html.escape(str(c))}" aria-sort="none" onclick="sortTable(this)">'
@@ -138,6 +142,8 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, title="fund_table.cs
             cls = ""
             if c == "规模(净资产)" and str(row.get("代码")) in small_codes:
                 cls = "small"
+            elif c == "基金经理" and str(row.get("代码")) in mgr_change_codes:
+                cls = "mgrchg"
             elif c in ("持有较上期", "较上期"):
                 cls = "up" if val.startswith("↑") else "down" if val.startswith("↓") else ""
             tds.append(f'<td class="{cls}" data-sort="{data_sort}">{_html.escape(val)}</td>')
@@ -152,8 +158,8 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, title="fund_table.cs
     )
 
 
-def render_sortable_table(df: pd.DataFrame, small_codes=None, title="fund_table.csv"):
+def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None, title="fund_table.csv"):
     """在 Streamlit 页面上渲染可点表头排序的表格"""
     n = len(df)
     height = min(120 + 36 * n, 700)
-    st.iframe(sortable_table_html(df, small_codes, title), height=height)
+    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, title), height=height)

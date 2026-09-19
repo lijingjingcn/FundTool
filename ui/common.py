@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """各页面共享的逻辑：数据客户端、本地持久化（我的基金/查询历史）、
 单只基金总览行与详情渲染、总览表高亮、分组结果渲染。"""
+import datetime
 import json
 import os
 import re
@@ -33,6 +34,29 @@ BATCH_PAUSE = 8  # 批间停顿秒数
 SMALL_NAV_YUAN = 0.5e8
 # 经理持有份额对比的报告期数：2 = 当前期报 + 上一份中报/年报
 HISTORY_N = 2
+# 经理变更提示窗口（天）：近半年内有新任/离任时，基金经理单元格琥珀色提示
+MGR_CHANGE_DAYS = 183
+
+
+def _mgr_change_label(tenure_rows):
+    """近半年基金经理变更：'新任' / '离任' / '新任+离任'，无变更返回 ''。
+    新任 = 现任经理的上任日期在窗口内；离任 = 有经理的离任日期在窗口内。"""
+    threshold = datetime.date.today() - datetime.timedelta(days=MGR_CHANGE_DAYS)
+    new = left = False
+    for t in tenure_rows or []:
+        try:
+            start = datetime.date.fromisoformat(str(t.get("start", ""))[:10])
+        except ValueError:
+            start = None
+        try:
+            end = datetime.date.fromisoformat(str(t.get("end", ""))[:10])
+        except ValueError:
+            end = None
+        if t.get("end") == "至今" and start and start > threshold:
+            new = True
+        if t.get("end") != "至今" and end and end > threshold:
+            left = True
+    return "+".join(p for p, on in (("新任", new), ("离任", left)) if on)
 
 
 @st.cache_resource
@@ -135,11 +159,11 @@ def _fmt_change(chg):
 # ---------------- 单只基金：总览行 / 详情 / 批量查询 ----------------
 def fund_overview_row(code, with_holding):
     """单只基金的总览行（分组查询与经理基金列表共用）。
-    返回 (row, 是否迷你基金, 持有变化原始值如"升2档")；基金不存在时 row=None。
-    基本信息网络失败抛 FundApiError；持有份额失败不致命，列内显示失败原因。"""
+    返回 (row, 是否迷你基金, 持有变化原始值如"升2档", 经理变更标签"新任/离任/新任+离任"或"")；
+    基金不存在时 row=None。基本信息网络失败抛 FundApiError；持有份额失败不致命，列内显示失败原因。"""
     info = get_client().basic_info(code)
     if info is None:
-        return None, False, ""
+        return None, False, "", ""
     nav = nav_yuan(info.get("ENDNAV"))
     scale = yi(info.get("ENDNAV"))
     small = nav is not None and nav < SMALL_NAV_YUAN
@@ -172,13 +196,16 @@ def fund_overview_row(code, with_holding):
             row["基金经理持有本基金"] = "--"
             row["持有数据来源"] = "获取失败"
     row["持有较上期"] = _fmt_change(chg)
-    return row, small, chg
+    # 近半年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
+    mgr_chg = _mgr_change_label(get_client().manager_tenure(code))
+    return row, small, chg, mgr_chg
 
 
 def query_all(codes, with_holding, status_box, progress_bar):
     """逐只查询，自动分批直到全部完成。
-    返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}、{代码: 持有变化（升N档/降N档）}"""
-    results, errors, small_nav, chg_map = {}, {}, {}, {}
+    返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}、
+    {代码: 持有变化（升N档/降N档）}、{代码: 经理变更标签（新任/离任）}"""
+    results, errors, small_nav, chg_map, mgr_change = {}, {}, {}, {}, {}
     total = len(codes)
     n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
     for i, code in enumerate(codes):
@@ -186,7 +213,7 @@ def query_all(codes, with_holding, status_box, progress_bar):
             status_box.update(label=f"第 {i // BATCH_SIZE}/{n_batches} 批完成，批间停顿 {BATCH_PAUSE} 秒…")
             time.sleep(BATCH_PAUSE)
         try:
-            row, small, chg = fund_overview_row(code, with_holding)
+            row, small, chg, mgr_chg = fund_overview_row(code, with_holding)
             if row is None:
                 errors[code] = "未找到该基金（代码不存在或已清盘）"
                 continue
@@ -194,12 +221,14 @@ def query_all(codes, with_holding, status_box, progress_bar):
                 small_nav[code] = row["规模(净资产)"]
             if chg and chg != "持平":
                 chg_map[code] = chg
+            if mgr_chg:
+                mgr_change[code] = mgr_chg
             results[code] = row
         except FundApiError as e:
             errors[code] = str(e)
         status_box.update(label=f"正在查询第 {i + 1}/{total} 只（第 {i // BATCH_SIZE + 1}/{n_batches} 批）")
         progress_bar.progress((i + 1) / total, text=f"查询进度 {i + 1}/{total}（共 {n_batches} 批）")
-    return results, errors, small_nav, chg_map
+    return results, errors, small_nav, chg_map, mgr_change
 
 
 def render_fund_detail(code, with_holding=None):
@@ -275,6 +304,9 @@ def render_fund_detail(code, with_holding=None):
     tenure = get_client().manager_tenure(code)
     if tenure:
         st.markdown("**基金经理任职情况**")
+        _mcl = _mgr_change_label(tenure)
+        if _mcl:
+            st.caption(f"🔁 近半年基金经理有变更：{_mcl}（基金经理单元格已琥珀色提示）")
         tdf = pd.DataFrame(
             [
                 {"基金经理": "、".join(t["managers"]), "起始": t["start"], "截止": t["end"],
@@ -293,6 +325,19 @@ _SMALL_BG = "background-color: rgba(229,57,53,0.45)"
 # 经理持有份额变化：升档绿色 / 降档红色
 _CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
 _CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
+# 近半年基金经理变更：基金经理单元格琥珀色
+_MGRCHG_BG = "background-color: rgba(255,170,0,0.45)"
+
+
+def _highlight_mgr_change(changed_codes, codes):
+    """基金经理列按行高亮：近半年经理有变更的行，基金经理单元格上底色"""
+
+    def _hl(col):
+        if col.name != "基金经理":
+            return [""] * len(col)
+        return [_MGRCHG_BG if c in changed_codes else "" for c in codes]
+
+    return _hl
 
 
 def _highlight_dup_rows(dup_codes):
@@ -335,10 +380,14 @@ def render_group(name, codes, results):
         df = pd.DataFrame(rows)
         small_nav = st.session_state.get("small_nav") or {}
         small_here = {c for c in df["代码"] if c in small_nav}
+        mgr_change = st.session_state.get("mgr_change") or {}
+        chg_here = {c for c in df["代码"] if c in mgr_change}
         # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）
         styler = df.style.apply(_highlight_dup_rows(highlight), axis=1)
         if small_here:
             styler = styler.apply(_highlight_small_scale(small_here, df["代码"]), axis=0)
+        if chg_here:
+            styler = styler.apply(_highlight_mgr_change(chg_here, df["代码"]), axis=0)
         if "持有较上期" in df.columns:
             styler = styler.apply(_highlight_changes, axis=0)
         st.table(styler.hide(axis="index"))

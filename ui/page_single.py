@@ -25,10 +25,30 @@ st.caption("输入 6 位基金代码、基金名称关键词或基金经理姓�
 
 # ---------------- 选定基金 / 选定经理 ----------------
 def _pick_fund(code, name=""):
-    """选定一只基金查看详情并记入历史"""
+    """选定一只基金查看详情（详情显示在页面底部），并记入历史"""
     st.session_state["single_result_code"] = code
     st.session_state["search_matches"] = None
+    st.session_state["detail_scope"] = "page"
     record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
+
+
+def _pick_manager_fund(mgr_id, code, name=""):
+    """从经理分块里点基金：详情就地显示在该经理分块内（而不是长页面最底部）"""
+    st.session_state["single_result_code"] = code
+    st.session_state["detail_scope"] = "manager"
+    st.session_state["detail_manager_id"] = mgr_id
+    record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
+
+
+def _render_fund_detail_section(code):
+    """单只基金详情块（成功行 + 展开式详情），经理分块内与页面底部共用"""
+    info = get_client().basic_info(code)
+    if info is None:
+        st.error(f"未找到基金 {code}（代码不存在或已清盘）")
+        return
+    st.success(f"**{info.get('SHORTNAME')}**（{code}）· {info.get('FTYPE', '')} · {info.get('JJGS', '')}")
+    with st.expander("基金详情", expanded=True):
+        render_fund_detail(code, with_holding=True)
 
 
 def _view_manager(m):
@@ -150,12 +170,12 @@ def _render_manager_funds(m):
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
     # 与分组总览同一套列：含基金经理持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位）
-    rows, small_here = [], set()
+    rows, small_here, mgrchg_here = [], set(), set()
     with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
             _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
             try:
-                row, _small, _chg = fund_overview_row(_code, with_holding=True)
+                row, _small, _chg, _mchg = fund_overview_row(_code, with_holding=True)
             except FundApiError:
                 row = None
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底
@@ -165,17 +185,24 @@ def _render_manager_funds(m):
             else:
                 if _small:
                     small_here.add(_code)
+                if _mchg:
+                    mgrchg_here.add(_code)
             rows.append(row)
         _mst.update(label="查询完成", state="complete", expanded=False)
     st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
-    render_sortable_table(pd.DataFrame(rows), small_codes=small_here,
+    render_sortable_table(pd.DataFrame(rows), small_codes=small_here, mgr_change_codes=mgrchg_here,
                            title=f"基金信息-经理{m['name']}.csv")
     st.caption("点击基金查看完整详情（含基金经理持有份额）")
     _mvcols = st.columns(4)
     for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
         with _mvcols[_i % 4]:
             st.button(f"{_name[:10]} {_code}", key=f"mvfund_{m['id']}_{_code}",
-                      on_click=_pick_fund, args=(_code, _name), width="stretch")
+                      on_click=_pick_manager_fund, args=(m["id"], _code, _name), width="stretch")
+    # 就地详情：点本分块的基金，详情显示在本分块内（共管基金只显示在被点击的经理分块）
+    if (st.session_state.get("detail_scope") == "manager"
+            and st.session_state.get("detail_manager_id") == m["id"]
+            and st.session_state.get("single_result_code")):
+        _render_fund_detail_section(st.session_state["single_result_code"])
 
 
 _mv = st.session_state.get("manager_view")
@@ -200,16 +227,10 @@ if _views:
         ):
             _render_manager_funds(_m)
 
-# ---------------- 单只基金详情 ----------------
+# ---------------- 单只基金详情（页面底部；从经理分块点开的详情就地显示在分块内） ----------------
 _scode = st.session_state.get("single_result_code")
-if _scode:
-    _sinfo = get_client().basic_info(_scode)
-    if _sinfo is None:
-        st.error(f"未找到基金 {_scode}（代码不存在或已清盘）")
-    else:
-        st.success(f"**{_sinfo.get('SHORTNAME')}**（{_scode}）· {_sinfo.get('FTYPE', '')} · {_sinfo.get('JJGS', '')}")
-        with st.expander("基金详情", expanded=True):
-            render_fund_detail(_scode, with_holding=True)
+if _scode and st.session_state.get("detail_scope") != "manager":
+    _render_fund_detail_section(_scode)
 
 # ---------------- 查询历史 ----------------
 _hist = load_history()
