@@ -148,6 +148,48 @@ def _fmt_change(chg):
     return ("↑" if chg.startswith("升") else "↓") + chg[1:]
 
 
+def fund_overview_row(code, with_holding):
+    """单只基金的总览行（分组查询与经理基金列表共用）。
+    返回 (row, 是否迷你基金, 持有变化原始值如"升2档")；基金不存在时 row=None。
+    基本信息网络失败抛 FundApiError；持有份额失败不致命，列内显示失败原因。"""
+    info = get_client().basic_info(code)
+    if info is None:
+        return None, False, ""
+    nav = nav_yuan(info.get("ENDNAV"))
+    scale = yi(info.get("ENDNAV"))
+    small = nav is not None and nav < SMALL_NAV_YUAN
+    if small:
+        scale += " ⚠️"
+    row = {"代码": code, "名称": info.get("SHORTNAME", "--"), "类型": info.get("FTYPE", "--"),
+           "基金经理": (info.get("JJJL") or "--").replace(",", "、"),
+           "规模(净资产)": scale,
+           "规模日期": (info.get("FEGMRQ") or "--").replace(" 00:00:00", ""),
+           "净值日期": info.get("FSRQ", "--")}
+    chg = ""
+    if with_holding:
+        try:
+            hold = get_manager_holding(get_client(), code)
+            if hold["status"] == "ok":
+                tag = "中报" if "中期" in hold.get("report_title", "") else "年报"
+                rng = format_range(hold.get("manager_range"))
+                row["基金经理持有本基金"] = rng or "见报告原文"
+                row["持有数据来源"] = f"{hold.get('report_date', '')}{tag}"
+            else:
+                row["基金经理持有本基金"] = "--"
+                row["持有数据来源"] = hold.get("error", "获取失败")
+            # 与上一份中报/年报对比（各报告解析结果永久缓存，只有新报告需要下载）
+            try:
+                hist = get_manager_holding_history(get_client(), code, HISTORY_N)
+                chg = hist[0].get("change") if hist else ""
+            except FundApiError:
+                chg = ""
+        except FundApiError:
+            row["基金经理持有本基金"] = "--"
+            row["持有数据来源"] = "获取失败"
+    row["持有较上期"] = _fmt_change(chg)
+    return row, small, chg
+
+
 def query_all(codes, with_holding, status_box, progress_bar):
     """逐只查询，自动分批直到全部完成。
     返回 {代码: 行数据}、{代码: 错误}、{代码: 规模文案（迷你基金）}、{代码: 持有变化（升N档/降N档）}"""
@@ -159,39 +201,14 @@ def query_all(codes, with_holding, status_box, progress_bar):
             status_box.update(label=f"第 {i // BATCH_SIZE}/{n_batches} 批完成，批间停顿 {BATCH_PAUSE} 秒…")
             time.sleep(BATCH_PAUSE)
         try:
-            info = get_client().basic_info(code)
-            if info is None:
+            row, small, chg = fund_overview_row(code, with_holding)
+            if row is None:
                 errors[code] = "未找到该基金（代码不存在或已清盘）"
                 continue
-            nav = nav_yuan(info.get("ENDNAV"))
-            scale = yi(info.get("ENDNAV"))
-            if nav is not None and nav < SMALL_NAV_YUAN:
-                scale += " ⚠️"
-                small_nav[code] = scale
-            row = {"代码": code, "名称": info.get("SHORTNAME", "--"), "类型": info.get("FTYPE", "--"),
-                   "基金经理": (info.get("JJJL") or "--").replace(",", "、"),
-                   "规模(净资产)": scale,
-                   "规模日期": (info.get("FEGMRQ") or "--").replace(" 00:00:00", ""),
-                   "净值日期": info.get("FSRQ", "--")}
-            if with_holding:
-                hold = get_manager_holding(get_client(), code)
-                if hold["status"] == "ok":
-                    tag = "中报" if "中期" in hold.get("report_title", "") else "年报"
-                    rng = format_range(hold.get("manager_range"))
-                    row["基金经理持有本基金"] = rng or "见报告原文"
-                    row["持有数据来源"] = f"{hold.get('report_date', '')}{tag}"
-                else:
-                    row["基金经理持有本基金"] = "--"
-                    row["持有数据来源"] = hold.get("error", "获取失败")
-                # 与上一份中报/年报对比（各报告解析结果永久缓存，只有新报告需要下载）
-                try:
-                    hist = get_manager_holding_history(get_client(), code, HISTORY_N)
-                    chg = hist[0].get("change") if hist else ""
-                except FundApiError:
-                    chg = ""
-                row["持有较上期"] = _fmt_change(chg)
-                if chg and chg != "持平":
-                    chg_map[code] = chg
+            if small:
+                small_nav[code] = row["规模(净资产)"]
+            if chg and chg != "持平":
+                chg_map[code] = chg
             results[code] = row
         except FundApiError as e:
             errors[code] = str(e)
@@ -434,28 +451,46 @@ def _pick_fund(code, name=""):
     record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
 
 
+def _view_manager(m):
+    """选定一位基金经理，展示其管理的基金"""
+    st.session_state["manager_view"] = m
+
+
 st.subheader("🔍 单只基金查询")
 # 表单内的文本框按「回车」即提交，与点「🔍 查询」按钮等效
 with st.form("single_form"):
     _sq, _sgo = st.columns([4, 1])
-    _kw = _sq.text_input("基金代码或名称", key="single_q",
-                         placeholder="输入 6 位基金代码（如 005827）或基金名称关键词（如 蓝筹精选），回车即查",
+    _kw = _sq.text_input("基金代码、名称或基金经理", key="single_q",
+                         placeholder="输入 6 位基金代码（如 005827）/ 名称关键词（如 蓝筹精选）/ 基金经理姓名（如 张坤），回车即查",
                          label_visibility="collapsed")
     _go = _sgo.form_submit_button("🔍 查询", key="single_go", width="stretch")
 if _go:
     kw = _kw.strip()
     if not kw:
-        st.warning("请输入基金代码或名称关键词")
+        st.warning("请输入基金代码、名称关键词或基金经理姓名")
     elif re.fullmatch(r"\d{6}", kw):
+        st.session_state["manager_matches"] = None
+        st.session_state["manager_view"] = None
         _pick_fund(kw)
     else:
         st.session_state["single_result_code"] = None
         st.session_state["search_matches"] = get_client().search_funds(kw)
+        # 经理姓名：无官方搜索接口，用全量目录本地匹配（首次拉取约 5~10 秒，之后 7 天内走缓存）
+        st.session_state["manager_matches"] = None
+        st.session_state["manager_view"] = None
+        if len(kw) >= 2 and not re.search(r"\d", kw):
+            try:
+                st.session_state["manager_matches"] = get_client().search_managers(kw)
+            except FundApiError:
+                st.session_state["manager_matches"] = []
 
 _matches = st.session_state.get("search_matches")
 if _matches is not None:
     if not _matches:
-        st.info("没有匹配的基金，换个关键词试试（建议用简称里的两三个字）")
+        if st.session_state.get("manager_matches"):
+            st.info("没有名称匹配的基金，但找到同名基金经理 👇")
+        else:
+            st.info("没有匹配的基金，换个关键词试试（建议用简称里的两三个字）")
         st.session_state["search_matches"] = None
     else:
         mdict = {m["code"]: m for m in _matches}
@@ -467,6 +502,66 @@ if _matches is not None:
         )
         if st.button("查看该基金", key="single_view", type="primary"):
             _pick_fund(_sel, mdict[_sel]["name"])
+
+# 经理姓名匹配：每位经理一个卡片按钮，点击展开其管理的基金
+_mgrs = st.session_state.get("manager_matches")
+if _mgrs:
+    st.caption(f"👤 匹配到 {len(_mgrs)} 位基金经理（点击查看其管理的基金）")
+    for _m in _mgrs:
+        st.button(
+            f"👤 {_m['name']} · {_m['company']} · 现任 {len(_m['codes'])} 只 · 在管 {_m['scale']}",
+            key=f"mgr_{_m['id']}",
+            on_click=_view_manager,
+            args=(_m,),
+            width="stretch",
+        )
+
+_mv = st.session_state.get("manager_view")
+if _mv:
+    st.markdown(f"### 👤 {_mv['name']}（{_mv['company']}）")
+    _days = str(_mv.get("days", "--"))
+    _years = f"（约 {int(_days) // 365} 年）" if _days.isdigit() else ""
+    st.caption(
+        f"现任基金 {len(_mv['codes'])} 只 · 在管总规模 {_mv['scale']} · "
+        f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {_mv['best_return']}"
+    )
+    # 与分组总览同一套列与高亮：含基金经理持有本基金、持有较上期
+    rows, small_here = [], set()
+    with st.status(f"正在查询 {_mv['name']} 在管的 {len(_mv['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
+        for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):
+            _mst.update(label=f"正在查询 {_i + 1}/{len(_mv['codes'])} 只：{_name}")
+            try:
+                row, _small, _chg = fund_overview_row(_code, with_holding=True)
+            except FundApiError:
+                row = None
+            if row is None:  # 基本信息也拿不到：用目录里的名称兜底
+                row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": _mv["name"],
+                       "规模(净资产)": "--", "规模日期": "--", "净值日期": "--",
+                       "基金经理持有本基金": "--", "持有数据来源": "获取失败", "持有较上期": "--"}
+            else:
+                if _small:
+                    small_here.add(_code)
+            rows.append(row)
+        _mst.update(label="查询完成", state="complete", expanded=False)
+    _mvdf = pd.DataFrame(rows)
+    _styler = _mvdf.style.hide(axis="index")
+    if small_here:
+        _styler = _styler.apply(_highlight_small_scale(small_here, _mvdf["代码"]), axis=0)
+    _styler = _styler.apply(_highlight_changes, axis=0)
+    st.table(_styler)
+    st.download_button(
+        "⬇️ 导出 CSV",
+        _mvdf.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"基金信息-经理{_mv['name']}.csv",
+        mime="text/csv",
+        key=f"mgrcsv_{_mv['id']}",
+    )
+    st.caption("点击基金查看完整详情（含基金经理持有份额）")
+    _mvcols = st.columns(4)
+    for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):
+        with _mvcols[_i % 4]:
+            st.button(f"{_name[:10]} {_code}", key=f"mvfund_{_code}",
+                      on_click=_pick_fund, args=(_code, _name), width="stretch")
 
 _scode = st.session_state.get("single_result_code")
 if _scode:

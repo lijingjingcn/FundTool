@@ -176,6 +176,25 @@ def main():
     assert at4.selectbox[0].value == "000541", f"应为华商创新成长，实际 {at4.selectbox[0].value}"
     print("✅ 场景5d 通过：搜索重排后华商创新成长（000541）排第一")
 
+    # ---- 场景5e：按基金经理姓名搜索 → 其管理的基金列表 → 点击基金出详情 ----
+    next(t for t in at4.text_input if t.key == "single_q").set_value("张坤").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    mgr_btn = next((b for b in at4.button if b.key == "mgr_30189744"), None)
+    assert mgr_btn is not None, f"应出现张坤（易方达基金）的经理卡片，实际 {[b.key for b in at4.button]}"
+    mgr_btn.click().run()
+    tables = [t.value.data if hasattr(t.value, "data") else t.value for t in at4.table]
+    mv = [v for v in tables if hasattr(v, "columns") and "005827" in list(v.get("代码", []))]
+    assert mv, "张坤的现任基金表应包含 005827"
+    mdf = mv[0]
+    # 经理基金列表与分组总览同一套列：持有份额 + 较上期
+    assert "基金经理持有本基金" in mdf.columns and "持有较上期" in mdf.columns, list(mdf.columns)
+    mrow = mdf[mdf["代码"] == "005827"].iloc[0]
+    assert mrow["基金经理持有本基金"] == ">100万份", mrow["基金经理持有本基金"]
+    assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", mrow["持有较上期"]), mrow["持有较上期"]
+    next(b for b in at4.button if b.key == "mvfund_005827").click().run()
+    assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
+    print("✅ 场景5e 通过：按经理姓名「张坤」搜到在管基金，总览含经理持有与较上期，点击可查详情")
+
     print("\n全部冒烟测试通过 🎉")
 
 

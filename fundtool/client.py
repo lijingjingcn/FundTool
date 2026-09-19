@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、定期报告公告、报告 PDF 下载、基金搜索"""
+"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、基金经理目录、定期报告公告、报告 PDF 下载、基金搜索"""
+import json
 import os
 import re
 import time
@@ -14,6 +15,13 @@ _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 class FundApiError(Exception):
     pass
+
+
+def _parse_js_object(text):
+    """解析 `var returnjson= {data:[...],pages:9}` 这类键不带引号的非严格 JSON"""
+    body = text[text.find("{"):text.rfind("}") + 1]
+    body = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', body)
+    return json.loads(body)
 
 
 def _search_rel_rank(name, kw):
@@ -122,6 +130,58 @@ class EastFundClient:
         out.sort(key=lambda m: _search_rel_rank(m["name"], keyword))
         self.cache.set("search_v2", keyword, out)
         return out
+
+    def manager_dir(self):
+        """基金经理目录（全量约 4300 人，来自经理排行榜数据接口）。
+        每人含：姓名/公司/现任基金代码与名称列表/从业天数/在管总规模/现任最佳回报。
+        没有按姓名搜索的接口，全量拉回来本地匹配；人员变动低频，缓存 7 天。"""
+        cached = self.cache.get("mgrdir", "all", ttl=7 * 86400)
+        if cached is not None:
+            return cached
+        rows, pi = [], 1
+        while True:
+            r = self._get(
+                "https://fund.eastmoney.com/Data/FundDataPortfolio_Interface.aspx",
+                params={"dt": 14, "mc": "returnjson", "ft": "all", "pn": 500,
+                        "pi": pi, "sc": "abbname", "st": "asc"},
+            )
+            d = _parse_js_object(r.text)
+            # 行结构：[经理ID, 姓名, 公司ID, 公司, 现任基金代码, 现任基金名称,
+            #          从业天数, 最佳回报, 最佳回报基金代码, 最佳回报基金名称, 在管总规模, ...]
+            rows += [
+                {
+                    "id": it[0],
+                    "name": it[1],
+                    "company": it[3],
+                    "codes": [c for c in (it[4] or "").split(",") if c],
+                    "names": [n for n in (it[5] or "").split(",") if n],
+                    "days": it[6],
+                    "scale": (it[10] or "").replace("亿元", "亿"),
+                    "best_return": it[7],
+                }
+                for it in d.get("data") or []
+                if len(it) >= 11
+            ]
+            pages = int(d.get("pages") or 1)
+            if pi >= pages or pi >= 30:  # 防御：目录异常膨胀时最多 30 页
+                break
+            pi += 1
+        self.cache.set("mgrdir", "all", rows)
+        return rows
+
+    def search_managers(self, name):
+        """按姓名搜基金经理：精确 > 前缀 > 包含，同名多人全部返回（最多 20 位）"""
+        name = (name or "").strip()
+        if not name:
+            return []
+        rows = self.manager_dir()
+        for pred in (lambda r: r["name"] == name,
+                     lambda r: r["name"].startswith(name),
+                     lambda r: name in r["name"]):
+            out = [r for r in rows if pred(r)]
+            if out:
+                return out[:20]
+        return []
 
     def manager_tenure(self, code):
         """基金经理任职记录（现任+离任）。该接口为附加信息，失败不致命。"""
