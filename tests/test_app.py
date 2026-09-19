@@ -236,6 +236,8 @@ def main():
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"
     assert h.count("<tr>") == 3, "表头行 + 2 数据行"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
+    assert "tr:hover td:not(.small):not(.up):not(.down)" in h and "tr:hover td {" not in h, \
+        "行悬停底色不得覆盖红/绿高亮单元格"
     print("✅ 场景5f 通过：可排序表格语义排序键与高亮正确")
 
     print("\n全部冒烟测试通过 🎉")

@@ -64,8 +64,9 @@ th { position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none;
 th:hover { background: #e2e7ee; }
 th .arr { display: inline-block; width: 1.1em; color: #5a6b81; font-weight: 400; }
 td { padding: 6px 9px; white-space: nowrap; border-bottom: 1px solid #e6e9ee; color: #26313f; }
-tr:hover td { background: rgba(120,140,170,0.10); }
 td.small { background: __SMALL__; } td.up { background: __UP__; } td.down { background: __DOWN__; }
+/* 行悬停底色不覆盖高亮单元格（红/绿提示悬停时保持可见） */
+tr:hover td:not(.small):not(.up):not(.down) { background: rgba(120,140,170,0.10); }
 @media (prefers-color-scheme: dark) {
   th { background: #212b3b; color: #dbe3ee; border-bottom-color: #364257; }
   th:hover { background: #2a3648; }
