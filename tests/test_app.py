@@ -210,6 +210,20 @@ def main():
     assert sum("点击表头排序" in c.value for c in at4.caption) >= 2, "两位经理各应有一个排序表"
     print("✅ 场景5g 通过：一次输入张坤+杨思亮，两位经理分块展示在管基金（共管基金无冲突）")
 
+    # ---- 场景5h：同名经理提示（目录中 吴昊 6 位、李博 3 位重名） ----
+    next(t for t in at4.text_input if t.key == "single_q").set_value("吴昊").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    infos = [i.value for i in at4.info]
+    assert any("同名基金经理" in v and "吴昊" in v and "6 位" in v for v in infos), infos
+    assert sum(1 for b in at4.button if b.key and b.key.startswith("mgr_")) == 6, \
+        [b.key for b in at4.button if b.key and b.key.startswith("mgr_")]
+    print("✅ 场景5h(单人) 通过：「吴昊」6 位同名经理有醒目提示，卡片按公司区分")
+    next(t for t in at4.text_input if t.key == "single_q").set_value("李博 张坤").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    infos = [i.value for i in at4.info]
+    assert any("同名基金经理" in v and "李博" in v and "3 位" in v for v in infos), infos
+    print("✅ 场景5h(多人) 通过：多经理查询中「李博」3 位同名同样有提示")
+
     # ---- 场景5f：可排序表格的语义排序键与高亮（纯函数直测） ----
     row, _small, _chg = fund_overview_row("005827", with_holding=True)
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]

@@ -54,7 +54,7 @@ if _go:
         st.session_state["search_matches"] = None
         st.session_state["manager_matches"] = None
         st.session_state["manager_view"] = None
-        managers, missing, seen = [], [], set()
+        managers, missing, seen, token_hits = [], [], set(), {}
         for t in tokens:
             if re.search(r"\d", t):  # 经理姓名不含数字；数字段留给基金搜索流程
                 missing.append(t)
@@ -63,6 +63,7 @@ if _go:
                 ms = get_client().search_managers(t)
             except FundApiError:
                 ms = []
+            token_hits[t] = len(ms)
             new = [m for m in ms if m["id"] not in seen]
             seen.update(m["id"] for m in new)
             if new:
@@ -72,13 +73,17 @@ if _go:
         if managers:
             st.session_state["manager_views"] = managers
             st.session_state["manager_missing"] = missing or None
+            # 同名经理提示：某个名字匹配到多位不同公司的经理
+            st.session_state["manager_dup_names"] = {t: c for t, c in token_hits.items() if c > 1} or None
         else:  # 一个经理都没匹配到：退回按整串做基金名称搜索
             st.session_state["manager_views"] = None
             st.session_state["manager_missing"] = None
+            st.session_state["manager_dup_names"] = None
             st.session_state["search_matches"] = get_client().search_funds(kw)
     elif re.fullmatch(r"\d{6}", kw):
         st.session_state["manager_views"] = None
         st.session_state["manager_missing"] = None
+        st.session_state["manager_dup_names"] = None
         st.session_state["manager_matches"] = None
         st.session_state["manager_view"] = None
         _pick_fund(kw)
@@ -86,6 +91,7 @@ if _go:
         st.session_state["single_result_code"] = None
         st.session_state["manager_views"] = None
         st.session_state["manager_missing"] = None
+        st.session_state["manager_dup_names"] = None
         st.session_state["search_matches"] = get_client().search_funds(kw)
         # 经理姓名：无官方搜索接口，用全量目录本地匹配（首次拉取约 5~10 秒，之后 7 天内走缓存）
         st.session_state["manager_matches"] = None
@@ -119,6 +125,11 @@ if _matches is not None:
 # ---------------- 经理姓名匹配：经理卡片 + 在管基金总览 ----------------
 _mgrs = st.session_state.get("manager_matches")
 if _mgrs:
+    _mnames = [m["name"] for m in _mgrs]
+    _dupn = {n: _mnames.count(n) for n in set(_mnames) if _mnames.count(n) > 1}
+    if _dupn:
+        st.info("⚠️ 同名基金经理：" + "；".join(
+            f"「{n}」{c} 位（不同公司，均已列出，请按所属公司区分）" for n, c in _dupn.items()))
     st.caption(f"👤 匹配到 {len(_mgrs)} 位基金经理（点击查看其管理的基金）")
     for _m in _mgrs:
         st.button(
@@ -176,6 +187,10 @@ if _mv:
 _views = st.session_state.get("manager_views")
 if _views:
     st.caption(f"👥 共匹配 {len(_views)} 位基金经理，分别展示其在管基金（点开折叠块查看）")
+    if st.session_state.get("manager_dup_names"):
+        st.info("⚠️ 同名基金经理：" + "；".join(
+            f"「{n}」{c} 位（不同公司，均已分块展示，请按所属公司区分）"
+            for n, c in st.session_state["manager_dup_names"].items()))
     if st.session_state.get("manager_missing"):
         st.info("未匹配到基金经理：" + "、".join(st.session_state["manager_missing"]))
     for _i, _m in enumerate(_views):
