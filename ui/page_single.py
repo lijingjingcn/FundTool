@@ -40,19 +40,52 @@ def _view_manager(m):
 with st.form("single_form"):
     _sq, _sgo = st.columns([4, 1])
     _kw = _sq.text_input("基金代码、名称或基金经理", key="single_q",
-                         placeholder="输入 6 位基金代码（如 005827）/ 名称关键词（如 蓝筹精选）/ 基金经理姓名（如 张坤），回车即查",
+                         placeholder="基金代码（如 005827）/ 名称关键词（如 蓝筹精选）/ 经理姓名（如 张坤，可一次多位，空格或逗号分隔），回车即查",
                          label_visibility="collapsed")
     _go = _sgo.form_submit_button("🔍 查询", key="single_go", width="stretch")
 if _go:
     kw = _kw.strip()
+    # 空格/逗号/顿号/分号分隔的多段输入：一次查询多位基金经理，分块展示
+    tokens = [t for t in re.split(r"[,，、;；/\s]+", kw) if t]
     if not kw:
         st.warning("请输入基金代码、名称关键词或基金经理姓名")
+    elif len(tokens) > 1:
+        st.session_state["single_result_code"] = None
+        st.session_state["search_matches"] = None
+        st.session_state["manager_matches"] = None
+        st.session_state["manager_view"] = None
+        managers, missing, seen = [], [], set()
+        for t in tokens:
+            if re.search(r"\d", t):  # 经理姓名不含数字；数字段留给基金搜索流程
+                missing.append(t)
+                continue
+            try:
+                ms = get_client().search_managers(t)
+            except FundApiError:
+                ms = []
+            new = [m for m in ms if m["id"] not in seen]
+            seen.update(m["id"] for m in new)
+            if new:
+                managers.extend(new)
+            else:
+                missing.append(t)
+        if managers:
+            st.session_state["manager_views"] = managers
+            st.session_state["manager_missing"] = missing or None
+        else:  # 一个经理都没匹配到：退回按整串做基金名称搜索
+            st.session_state["manager_views"] = None
+            st.session_state["manager_missing"] = None
+            st.session_state["search_matches"] = get_client().search_funds(kw)
     elif re.fullmatch(r"\d{6}", kw):
+        st.session_state["manager_views"] = None
+        st.session_state["manager_missing"] = None
         st.session_state["manager_matches"] = None
         st.session_state["manager_view"] = None
         _pick_fund(kw)
     else:
         st.session_state["single_result_code"] = None
+        st.session_state["manager_views"] = None
+        st.session_state["manager_missing"] = None
         st.session_state["search_matches"] = get_client().search_funds(kw)
         # 经理姓名：无官方搜索接口，用全量目录本地匹配（首次拉取约 5~10 秒，之后 7 天内走缓存）
         st.session_state["manager_matches"] = None
@@ -96,26 +129,26 @@ if _mgrs:
             width="stretch",
         )
 
-_mv = st.session_state.get("manager_view")
-if _mv:
-    st.markdown(f"### 👤 {_mv['name']}（{_mv['company']}）")
-    _days = str(_mv.get("days", "--"))
+def _render_manager_funds(m):
+    """一位经理的在管基金总览（单个经理视图与多位经理分块展示共用）。
+    基金按钮的 key 带经理 ID 前缀：共管基金会在多位经理块中重复出现，避免 key 冲突。"""
+    _days = str(m.get("days", "--"))
     _years = f"（约 {int(_days) // 365} 年）" if _days.isdigit() else ""
     st.caption(
-        f"现任基金 {len(_mv['codes'])} 只 · 在管总规模 {_mv['scale']} · "
-        f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {_mv['best_return']}"
+        f"现任基金 {len(m['codes'])} 只 · 在管总规模 {m['scale']} · "
+        f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
     # 与分组总览同一套列：含基金经理持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位）
     rows, small_here = [], set()
-    with st.status(f"正在查询 {_mv['name']} 在管的 {len(_mv['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
-        for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):
-            _mst.update(label=f"正在查询 {_i + 1}/{len(_mv['codes'])} 只：{_name}")
+    with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
+        for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
+            _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
             try:
                 row, _small, _chg = fund_overview_row(_code, with_holding=True)
             except FundApiError:
                 row = None
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底
-                row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": _mv["name"],
+                row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模(净资产)": "--", "规模日期": "--", "净值日期": "--",
                        "基金经理持有本基金": "--", "持有数据来源": "获取失败", "持有较上期": "--"}
             else:
@@ -125,13 +158,32 @@ if _mv:
         _mst.update(label="查询完成", state="complete", expanded=False)
     st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
     render_sortable_table(pd.DataFrame(rows), small_codes=small_here,
-                           title=f"基金信息-经理{_mv['name']}.csv")
+                           title=f"基金信息-经理{m['name']}.csv")
     st.caption("点击基金查看完整详情（含基金经理持有份额）")
     _mvcols = st.columns(4)
-    for _i, (_code, _name) in enumerate(zip(_mv["codes"], _mv["names"])):
+    for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
         with _mvcols[_i % 4]:
-            st.button(f"{_name[:10]} {_code}", key=f"mvfund_{_code}",
+            st.button(f"{_name[:10]} {_code}", key=f"mvfund_{m['id']}_{_code}",
                       on_click=_pick_fund, args=(_code, _name), width="stretch")
+
+
+_mv = st.session_state.get("manager_view")
+if _mv:
+    st.markdown(f"### 👤 {_mv['name']}（{_mv['company']}）")
+    _render_manager_funds(_mv)
+
+# 一次输入多位经理：逐个匹配、每位一个分块（可折叠）展示在管基金
+_views = st.session_state.get("manager_views")
+if _views:
+    st.caption(f"👥 共匹配 {len(_views)} 位基金经理，分别展示其在管基金（点开折叠块查看）")
+    if st.session_state.get("manager_missing"):
+        st.info("未匹配到基金经理：" + "、".join(st.session_state["manager_missing"]))
+    for _i, _m in enumerate(_views):
+        with st.expander(
+            f"👤 {_m['name']} · {_m['company']} · 现任 {len(_m['codes'])} 只 · 在管 {_m['scale']}",
+            expanded=_i == 0,
+        ):
+            _render_manager_funds(_m)
 
 # ---------------- 单只基金详情 ----------------
 _scode = st.session_state.get("single_result_code")

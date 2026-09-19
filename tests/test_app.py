@@ -24,7 +24,7 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from fundtool.holdings import range_change  # noqa: E402
-from ui.common import fund_overview_row  # noqa: E402
+from ui.common import fund_overview_row, get_client  # noqa: E402
 from ui.sortable_table import sortable_table_html  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -192,9 +192,23 @@ def main():
     mgr_btn.click().run()
     # 表格渲染为内嵌组件（iframe），AppTest 不可见；用渲染提示与基金按钮确认经理视图已出
     assert any("点击表头排序" in c.value for c in at4.caption), [c.value for c in at4.caption]
-    next(b for b in at4.button if b.key == "mvfund_005827")
-    next(b for b in at4.button if b.key == "mvfund_005827").click().run()
+    next(b for b in at4.button if b.key == "mvfund_30189744_005827")
+    next(b for b in at4.button if b.key == "mvfund_30189744_005827").click().run()
     assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
+    print("✅ 场景5e 通过：经理视图可点表头排序（含 CSV 导出），点击基金查详情")
+
+    # ---- 场景5g：一次输入多位经理姓名（张坤 杨思亮），分块展示各自在管基金 ----
+    next(t for t in at4.text_input if t.key == "single_q").set_value("张坤 杨思亮").run()
+    next(b for b in at4.button if b.key == "single_go").click().run()
+    cap = " ".join(c.value for c in at4.caption)
+    assert "共匹配 2 位基金经理" in cap, cap[:200]
+    assert any(b.key == "mvfund_30189744_005827" for b in at4.button), "张坤的基金按钮应存在"
+    yang_id = get_client().search_managers("杨思亮")[0]["id"]
+    assert any(b.key and b.key.startswith(f"mvfund_{yang_id}_") for b in at4.button), \
+        f"杨思亮的基金按钮应存在，实际 {[b.key for b in at4.button if b.key and b.key.startswith('mvfund_')]}"
+    # 共管基金（005827 两人都在管）不会因 key 冲突报错，且两位各有一份
+    assert sum("点击表头排序" in c.value for c in at4.caption) >= 2, "两位经理各应有一个排序表"
+    print("✅ 场景5g 通过：一次输入张坤+杨思亮，两位经理分块展示在管基金（共管基金无冲突）")
 
     # ---- 场景5f：可排序表格的语义排序键与高亮（纯函数直测） ----
     row, _small, _chg = fund_overview_row("005827", with_holding=True)
@@ -208,7 +222,7 @@ def main():
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"
     assert h.count("<tr>") == 3, "表头行 + 2 数据行"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
-    print("✅ 场景5e/5f 通过：经理视图可点表头排序（含 CSV 导出），语义排序键与高亮正确")
+    print("✅ 场景5f 通过：可排序表格语义排序键与高亮正确")
 
     print("\n全部冒烟测试通过 🎉")
 
