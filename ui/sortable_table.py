@@ -42,7 +42,23 @@ def _change_key(text):
     return 0 if v == "→持平" else None
 
 
-_COLUMN_KEYS = {"规模(净资产)": _scale_key, "基金经理持有本基金": _hold_key, "持有较上期": _change_key}
+def _num_key(text):
+    """取文案里的首个数字作排序键（如「3只」「3400天」「312.56亿」「123.45%」）"""
+    m = re.search(r"-?\d+(?:\.\d+)?", str(text))
+    return float(m.group()) if m else None
+
+
+_COLUMN_KEYS = {
+    "规模(净资产)": _scale_key,
+    "基金经理持有本基金": _hold_key,
+    "持有较上期": _change_key,
+    # 经理汇总表的列，按文案内首个数字排序
+    "本组持有": _num_key,
+    "现任基金": _num_key,
+    "在管总规模": _num_key,
+    "从业天数": _num_key,
+    "现任最佳回报": _num_key,
+}
 
 # 高亮底色（与总览表一致的半透明色，浅/深色主题都可读）
 _SMALL_BG = "rgba(229,57,53,0.45)"

@@ -24,7 +24,7 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from fundtool.holdings import range_change  # noqa: E402
-from ui.common import _mgr_change_label, fund_overview_row, get_client  # noqa: E402
+from ui.common import _mgr_change_label, fund_overview_row, get_client, manager_summary_rows  # noqa: E402
 from ui.sortable_table import sortable_table_html  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -85,6 +85,8 @@ def main():
     assert range_change(">100", "10-50") == "升2档" and range_change("10-50", ">100") == "降2档" and range_change("10-50", "10-50") == "持平" and range_change(">100", "") is None
     warn_texts = [w.value for w in at.warning]
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
+    # 每组一个经理汇总入口（可展开），标题带人数
+    assert any("本组经理汇总" in e.label for e in at.expander), [e.label for e in at.expander]
     # 近一年经理变更提示（005827 于 2026-05-23 新增共管经理，窗口一年内应有提示；窗口过后跳过）
     _chg_lbl = _mgr_change_label(get_client().manager_tenure("005827"))
     if _chg_lbl:
@@ -123,7 +125,20 @@ def main():
     assert list(df2["代码"]) == ["161725", "010790"], df2.to_string()
     warn_texts = [w.value for w in at.warning]
     assert any("010790" in w and "重复" in w for w in warn_texts), warn_texts
-    print("✅ 场景2 通过：两个分组各自出表，跨组重复有提醒")
+    assert sum("本组经理汇总" in e.label for e in at.expander) == 2, \
+        [e.label for e in at.expander]  # 两个分组各有一个经理汇总
+    print("✅ 场景2 通过：两个分组各自出表，跨组重复有提醒，各带经理汇总")
+
+    # ---- 场景2b：分组经理下钻——点经理按钮，就地渲染该经理全部在管基金（同「单只/经理查询」） ----
+    # 此时第一组=010790（海富通，经理周雪军/吴昊），第二组=161725+010790
+    gmgr_btns = [b for b in at.button if b.key and b.key.startswith("gmgr_")]
+    assert gmgr_btns, f"应渲染经理下钻按钮，实际 {[b.key for b in at.button]}"
+    wh = next((b for b in gmgr_btns if b.key == "gmgr_我的基金_30132788"), None)  # 吴昊（海富通）
+    assert wh is not None, f"010790 的经理吴昊应在下钻按钮中，实际 {[b.key for b in gmgr_btns]}"
+    wh.click().run()
+    assert any("点击表头排序" in c.value for c in at.caption), [c.value for c in at.caption]
+    next(b for b in at.button if b.key == "mvfund_30132788_010790")  # 吴昊在管基金按钮已渲染
+    print("✅ 场景2b 通过：分组页点经理按钮，就地展示其全部在管基金（含经理持有份额、可排序）")
 
     # ---- 场景3：持久化——全新会话（模拟下次启动）免输入直接查询 ----
     at2 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
@@ -263,6 +278,30 @@ def main():
     assert _mgr_change_label([{"start": _d(400), "end": "至今"}]) == ""
     assert _mgr_change_label([]) == ""
     print("✅ 场景5f 通过：可排序表格语义排序键/高亮与经理变更判定正确")
+
+    # ---- 场景6：经理汇总——同名经理按现任代码区分、目录未覆盖时按姓名兜底、排序 ----
+    fake_dir = [
+        {"id": "m1", "name": "张三", "company": "甲基金", "codes": ["005827", "110011"],
+         "names": [], "days": "3000", "scale": "300.00亿", "best_return": "120.00%"},
+        {"id": "m2", "name": "张三", "company": "乙基金", "codes": ["161725"],
+         "names": [], "days": "400", "scale": "5.00亿", "best_return": "10.00%"},
+        {"id": "m3", "name": "王五", "company": "丙基金", "codes": [],
+         "names": [], "days": "--", "scale": "--", "best_return": "--"},
+    ]
+    res = {"005827": {"名称": "蓝筹精选", "基金经理": "张三"},
+           "161725": {"名称": "白酒指数", "基金经理": "张三"},
+           "999999": {"名称": "新基金", "基金经理": "王五"}}
+    rows = manager_summary_rows(["005827", "161725", "999999"], res, fake_dir)
+    assert len(rows) == 3, rows
+    by_c = {r["公司"]: r for r in rows}
+    assert by_c["甲基金"]["本组持有"] == "1只" and by_c["甲基金"]["本组基金"] == "蓝筹精选", by_c["甲基金"]
+    assert by_c["乙基金"]["本组基金"] == "白酒指数", by_c["乙基金"]  # 同名「张三」两人各自成行、基金归属正确
+    assert by_c["丙基金"]["本组持有"] == "1只", by_c["丙基金"]  # 目录无该基金代码 → 按姓名兜底
+    assert rows[0]["公司"] == "甲基金", rows  # 持有只数并列时按在管总规模降序（300亿 > 5亿）
+    h = sortable_table_html(pd.DataFrame(rows))
+    assert 'data-col="在管总规模"' in h and 'data-sort="300.0"' in h, "汇总列应有数值排序键"
+    assert 'data-sort="3000.0"' in h, "从业天数应有数值排序键"
+    print("✅ 场景6 通过：经理汇总同名区分/姓名兜底/排序与数值排序键正确")
 
     print("\n全部冒烟测试通过 🎉")
 

@@ -19,6 +19,7 @@ from fundtool import (
     get_manager_holding,
     get_manager_holding_history,
 )
+from ui.sortable_table import render_sortable_table
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 测试通过 FUNDTOOL_DATA_FILE 指向临时文件，避免冒烟测试覆盖真实分组数据
@@ -369,6 +370,183 @@ def _highlight_changes(col):
     return out
 
 
+# ---------------- 分组经理汇总 ----------------
+def _manager_dir_snapshot():
+    """经理目录的会话级快照：多个分组标签页共用一次解析结果；获取失败返回 None（下次调用重试）"""
+    if st.session_state.get("mgr_dir") is None:
+        try:
+            st.session_state["mgr_dir"] = get_client().manager_dir()
+        except (FundApiError, ValueError):
+            return None
+    return st.session_state["mgr_dir"]
+
+
+def _group_manager_agg(codes, results, mgr_dir):
+    """分组与经理目录的聚合（纯函数）：[{mgr: 目录行, funds: [本组基金代码]}]。
+    经理定位优先用「基金代码 ∈ 经理现任代码列表」精确匹配——同名经理天然按人区分；
+    该基金在目录里没有记录时（新基金/目录最多 7 天未刷新），按姓名精确匹配兜底。
+    排序：本组持有只数降序 → 在管总规模降序 → 姓名。"""
+    agg = {}  # 经理ID -> {"mgr": 目录行, "funds": [基金代码]}
+    for code in codes:
+        if code not in results:
+            continue
+        hits = [r for r in mgr_dir if code in (r.get("codes") or [])]
+        if not hits:
+            names = {n for n in str(results[code].get("基金经理") or "").split("、") if n and n != "--"}
+            hits = [r for r in mgr_dir if r.get("name") in names]
+        for r in hits:
+            funds = agg.setdefault(r["id"], {"mgr": r, "funds": []})["funds"]
+            if code not in funds:
+                funds.append(code)
+
+    def _num(v):
+        m = re.search(r"-?\d+(?:\.\d+)?", str(v))
+        return float(m.group()) if m else -1.0
+
+    return sorted(
+        agg.values(),
+        key=lambda it: (-len(it["funds"]), -_num(it["mgr"].get("scale")), str(it["mgr"].get("name"))),
+    )
+
+
+def manager_summary_rows(codes, results, mgr_dir):
+    """一个分组的经理汇总行（纯函数，便于测试），列含义见 render_manager_summary。"""
+    rows = []
+    for it in _group_manager_agg(codes, results, mgr_dir):
+        r = it["mgr"]
+        days = str(r.get("days", "--"))
+        years = f"（约{int(days) // 365}年）" if days.isdigit() else ""
+        rows.append({
+            "基金经理": r.get("name") or "--",
+            "公司": r.get("company") or "--",
+            "本组持有": f"{len(it['funds'])}只",
+            "本组基金": "、".join(results[c]["名称"] for c in it["funds"]),
+            "现任基金": f"{len(r.get('codes') or [])}只",
+            "在管总规模": r.get("scale") or "--",
+            "从业天数": f"{days}天{years}" if days.isdigit() else days,
+            "现任最佳回报": r.get("best_return") or "--",
+        })
+    return rows
+
+
+def render_manager_summary(name, codes, results):
+    """一个分组的经理汇总表：本组每位基金经理的公司、在管基金数、在管总规模、从业年限。
+    数据全部来自经理目录快照（本地缓存 7 天），不触发逐基金查询。"""
+    mgr_dir = _manager_dir_snapshot()
+    if mgr_dir is None:
+        st.warning("👥 基金经理目录获取失败，本组经理汇总暂不可用（网络恢复后重开本页即可）")
+        return
+    rows = manager_summary_rows(codes, results, mgr_dir)
+    if not rows:
+        return
+    with st.expander(f"👥 本组经理汇总（{len(rows)} 位）"):
+        st.caption(
+            "「本组持有」= 该经理在本分组管理的基金数；在管信息来自经理目录快照"
+            "（本地缓存 7 天，可能与最新任职有短暂出入）。同名经理按「现任代码精确匹配」区分。"
+            "点表头排序（再点切换升降序），右上角可导出 CSV；下方按钮可下钻各经理的全部在管基金"
+        )
+        render_sortable_table(pd.DataFrame(rows), title=f"经理汇总-{name}.csv")
+
+
+# ---------------- 经理在管基金视图（单只/经理查询页与分组查询的经理下钻共用） ----------------
+def pick_manager_fund(mgr_id, code, name=""):
+    """从经理视图里点基金：详情就地显示在该经理视图内（而不是长页面最底部）"""
+    st.session_state["single_result_code"] = code
+    st.session_state["detail_scope"] = "manager"
+    st.session_state["detail_manager_id"] = mgr_id
+    record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
+
+
+def render_fund_detail_section(code):
+    """单只基金详情块（成功行 + 展开式详情），经理视图内与单只查询页底部共用"""
+    info = get_client().basic_info(code)
+    if info is None:
+        st.error(f"未找到基金 {code}（代码不存在或已清盘）")
+        return
+    st.success(f"**{info.get('SHORTNAME')}**（{code}）· {info.get('FTYPE', '')} · {info.get('JJGS', '')}")
+    with st.expander("基金详情", expanded=True):
+        render_fund_detail(code, with_holding=True)
+
+
+def render_manager_funds(m):
+    """一位经理的在管基金总览（单只/经理查询页与分组查询的经理下钻共用）。
+    基金按钮的 key 带经理 ID 前缀：共管基金会在多位经理块中重复出现，避免 key 冲突。"""
+    _days = str(m.get("days", "--"))
+    _years = f"（约 {int(_days) // 365} 年）" if _days.isdigit() else ""
+    st.caption(
+        f"现任基金 {len(m['codes'])} 只 · 在管总规模 {m['scale']} · "
+        f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
+    )
+    # 与分组总览同一套列：含基金经理持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位）
+    rows, small_here, mgrchg_here = [], set(), set()
+    with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
+        for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
+            _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
+            try:
+                row, _small, _chg, _mchg = fund_overview_row(_code, with_holding=True)
+            except FundApiError:
+                row = None
+            if row is None:  # 基本信息也拿不到：用目录里的名称兜底
+                row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
+                       "规模(净资产)": "--", "规模日期": "--", "净值日期": "--",
+                       "基金经理持有本基金": "--", "持有数据来源": "获取失败", "持有较上期": "--"}
+            else:
+                if _small:
+                    small_here.add(_code)
+                if _mchg:
+                    mgrchg_here.add(_code)
+            rows.append(row)
+        _mst.update(label="查询完成", state="complete", expanded=False)
+    st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
+    render_sortable_table(pd.DataFrame(rows), small_codes=small_here, mgr_change_codes=mgrchg_here,
+                           title=f"基金信息-经理{m['name']}.csv")
+    st.caption("点击基金查看完整详情（含基金经理持有份额）")
+    _mvcols = st.columns(4)
+    for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
+        with _mvcols[_i % 4]:
+            st.button(f"{_name[:10]} {_code}", key=f"mvfund_{m['id']}_{_code}",
+                      on_click=pick_manager_fund, args=(m["id"], _code, _name), width="stretch")
+    # 就地详情：点本视图的基金，详情显示在本视图内（共管基金只显示在被点击的经理视图）
+    if (st.session_state.get("detail_scope") == "manager"
+            and st.session_state.get("detail_manager_id") == m["id"]
+            and st.session_state.get("single_result_code")):
+        render_fund_detail_section(st.session_state["single_result_code"])
+
+
+def _view_group_manager(group, mgr):
+    """分组经理下钻：记录所选分组与经理，视图渲染在该分组内"""
+    st.session_state["group_mgr_view"] = {"group": group, "mgr": mgr}
+
+
+def render_manager_drilldown(name, codes, results):
+    """分组结果下方的经理下钻：每位经理一个按钮，点击就地查看其全部在管基金
+    （与「单只/经理查询」同款视图：逐基金查询含经理持有份额、点表头排序、点基金看详情）"""
+    mgr_dir = _manager_dir_snapshot()
+    if mgr_dir is None:
+        return
+    items = _group_manager_agg(codes, results, mgr_dir)
+    if not items:
+        return
+    st.caption("👤 点经理按钮查看其**全部在管基金**（同「单只/经理查询」：含经理持有份额、可排序、点基金看详情；首次查询每位经理约需数秒到几十秒）")
+    cols = st.columns(4)
+    view = st.session_state.get("group_mgr_view") or {}
+    for i, it in enumerate(items):
+        r = it["mgr"]
+        with cols[i % 4]:
+            st.button(
+                f"👤 {r['name']}·{str(r.get('company') or '').replace('基金', '')}",
+                key=f"gmgr_{name}_{r['id']}",
+                on_click=_view_group_manager,
+                args=(name, r),
+                help=f"{r.get('company')} · 现任 {len(r.get('codes') or [])} 只 · 在管 {r.get('scale')}",
+                width="stretch",
+            )
+    if view.get("group") == name and view.get("mgr"):
+        m = view["mgr"]
+        st.markdown(f"##### 👤 {m['name']}（{m.get('company')}）的全部在管基金")
+        render_manager_funds(m)
+
+
 def render_group(name, codes, results):
     """一个分组的结果：总览表 + 每只基金详情。重复的基金整行高亮。"""
     dup_codes = st.session_state.get("dup_codes") or set()
@@ -398,6 +576,8 @@ def render_group(name, codes, results):
             mime="text/csv",
             key=f"csv_{name}",
         )
+        render_manager_summary(name, codes, results)
+        render_manager_drilldown(name, codes, results)
     else:
         st.caption("该分组没有查询成功的基金")
     for code in codes:
