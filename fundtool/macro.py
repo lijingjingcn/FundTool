@@ -8,8 +8,10 @@
 
 纯数据层，不依赖 streamlit。接口若失效集中改这里。
 """
+import bisect
 import time
 import urllib.request
+from datetime import datetime, timedelta
 
 import requests
 
@@ -23,6 +25,11 @@ INDEXES = {
     "000852": "中证1000",
     "000985": "中证全指",
 }
+
+
+def tr_code(code):
+    """中证指数对应的全收益指数代码（000300 -> H00300）"""
+    return "H" + code[1:]
 
 _CSINDEX_START = "20050104"  # 指数估值历史起点（csindex 官网自 2005 年起提供市盈率）
 
@@ -79,7 +86,7 @@ def erp_series(index_rows, bond_rows):
     index_rows 为 index_daily() 的返回（升序），bond_rows 为 bond_yield() 的返回；
     按日期精确对齐（两边都是交易日），缺 PE 或缺当日国债收益率的点直接跳过。
     """
-    y10 = {r["date"]: r.get("cn10") for r in bond_rows if r.get("cn10") is not None}
+    y10 = {r["date"]: r["cn10"] for r in bond_rows if r.get("cn10") is not None}
     out = []
     for r in index_rows:
         pe, d = r.get("pe"), r.get("date")
@@ -88,6 +95,43 @@ def erp_series(index_rows, bond_rows):
         ep = 100.0 / pe
         out.append({"date": d, "close": r.get("close"), "pe": pe,
                     "ep": ep, "y10": y10[d], "erp": ep - y10[d]})
+    return out
+
+
+def dividend_yield_series(price_rows, tr_rows, lookback_days=365):
+    """滚动 12 个月股息率序列（单位 %），由全收益指数与价格指数推导：
+
+        股息率_t = TR_t × P_s / (TR_s × P_t) − 1，s 为约一年前最近的交易日
+
+    全收益指数含分红再投资、价格指数不含，两者比值即期间的滚动分红收益率。
+    与中证官网"股息率（计算用股本）"口径约有 0.1 个百分点的差异（再投资时点不同）。
+    """
+    p = {r["date"]: r.get("close") for r in price_rows if r.get("close")}
+    rows = [r for r in tr_rows if r.get("close") and r["date"] in p]
+    dates = [r["date"] for r in rows]
+    out = []
+    for r in rows:
+        d = datetime.strptime(r["date"], "%Y-%m-%d")
+        cutoff = (d - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        k = bisect.bisect_left(dates, cutoff)
+        if k <= 0:
+            continue  # 回看期数据不足（序列开头）
+        base = rows[k - 1]
+        y = (r["close"] / base["close"]) * (p[base["date"]] / p[r["date"]]) - 1
+        if -0.5 < y < 0.5:  # 排除数据异常点
+            out.append({"date": r["date"], "dp": y * 100.0})
+    return out
+
+
+def bond_spread_series(value_rows, bond_rows, vkey):
+    """任意指标值 − 中国 10 年期国债收益率的点差序列（百分点），按日期精确对齐。"""
+    y10 = {r["date"]: r["cn10"] for r in bond_rows if r.get("cn10") is not None}
+    out = []
+    for r in value_rows:
+        v, d = r.get(vkey), r.get("date")
+        if v is None or d not in y10:
+            continue
+        out.append({"date": d, vkey: v, "y10": y10[d], "spread": v - y10[d]})
     return out
 
 

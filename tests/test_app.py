@@ -350,6 +350,22 @@ def test_macro_page_renders():
     assert any("M2同比" in l for l in labels), labels
     assert any("股债性价比" in c for c in [df.columns for df in at.dataframe] if len(c)) or \
         any("股债性价比" in s.value for s in at.caption), "应展示股债性价比"
+    # 指数点位叠加开关：默认开（双轴图），关闭后图表仍正常
+    tgl = next(t for t in at.toggle if "指数点位" in t.label)
+    assert tgl.value is True
+    tgl.set_value(False).run()
+    assert not at.exception
+    # 股息率口径：切换后汇总表含股息率性价比列（AppTest 的 columns 是 column_config JSON 串）
+    metric = next(r for r in at.radio if "口径" in r.label)
+    metric.set_value("股息率").run()
+    assert not at.exception
+    cols = []
+    for df in at.dataframe:
+        try:
+            cols += list(json.loads(df.columns).keys())
+        except (ValueError, AttributeError):
+            cols += list(df.columns)
+    assert any("股息率性价比" in c for c in cols), cols
 
 
 if __name__ == "__main__":

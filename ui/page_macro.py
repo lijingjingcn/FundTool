@@ -16,8 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool.macro import (  # noqa: E402
     INDEXES,
     MacroApiError,
+    bond_spread_series,
+    dividend_yield_series,
     erp_series,
     percentile_rank,
+    tr_code,
 )
 from ui.constants import ERP_HIGH_PCT, ERP_LOW_PCT  # noqa: E402
 from ui.state import get_macro  # noqa: E402
@@ -41,6 +44,12 @@ with st.spinner("拉取宏观数据（首次约需十几秒，之后走本地缓
             idx_hist[_code] = macro.index_daily(_code)
         except MacroApiError as e:
             problems.append(f"{INDEXES[_code]}：{e}")
+    tr_hist = {}
+    for _code in INDEXES:
+        try:
+            tr_hist[_code] = macro.index_daily(tr_code(_code))
+        except MacroApiError:
+            tr_hist[_code] = None  # 全收益指数缺失时股息率口径降级，不影响其他板块
     for _kind in ("cpi", "ppi", "pmi", "gdp", "money"):
         try:
             econ[_kind] = macro.econ(_kind)
@@ -54,6 +63,14 @@ if problems:
     st.warning("部分数据拉取失败（可稍后刷新重试）：" + "；".join(problems[:3]) + ("……" if len(problems) > 3 else ""))
 
 erps = {c: (erp_series(rows, bond) if bond else []) for c, rows in idx_hist.items()}
+# 股息率口径：全收益/价格指数推导滚动12M股息率，再与10Y国债求点差
+dy_spreads = {}
+for _c, _rows in idx_hist.items():
+    _tr = tr_hist.get(_c)
+    if bond and _tr:
+        dy_spreads[_c] = bond_spread_series(dividend_yield_series(_rows, _tr), bond, "dp")
+    else:
+        dy_spreads[_c] = []
 
 
 # ---------------- 小工具 ----------------
@@ -99,70 +116,114 @@ tab_erp, tab_rate, tab_econ = st.tabs(["⚖️ 股债性价比", "💰 利率与
 with tab_erp:
     st.caption("股债性价比 = 指数盈利收益率(1÷PE) − 中国10年期国债收益率，越高代表股票相对债券越便宜；"
                "分位数按全部可得历史计算（指数估值自 2011 年中、国债收益率自 2005 年起）。")
+    metric = st.radio("口径", ["盈利收益率 (1/PE)", "股息率"], horizontal=True, key="erp_metric")
+    if metric == "股息率":
+        st.caption("股息率口径 = 指数滚动12个月股息率 − 10年期国债收益率；股息率由中证官网全收益指数与价格指数推导"
+                   "（与官方股息率口径约有 0.1 个百分点差异），为正说明仅分红收益就已高于国债。")
     if not bond or not erps:
         st.info("指数估值或国债收益率数据暂不可用，股债性价比无法计算。")
     else:
-        rows = []
-        for code in INDEXES:
-            if code not in erps or not erps[code]:
-                continue
-            cur = erps[code][-1]
-            rows.append({
-                "指数": f"{INDEXES[code]}（{code}）",
-                "PE(TTM)": cur["pe"],
-                "PE分位": percentile_rank([r["pe"] for r in erps[code]], cur["pe"]),
-                "盈利收益率": cur["ep"],
-                "股债性价比": cur["erp"],
-                "性价比分位": percentile_rank([r["erp"] for r in erps[code]], cur["erp"]),
-                "解读": _erp_hint(percentile_rank([r["erp"] for r in erps[code]], cur["erp"])),
-            })
+        if metric == "盈利收益率 (1/PE)":
+            rows = []
+            for code in INDEXES:
+                if code not in erps or not erps[code]:
+                    continue
+                cur = erps[code][-1]
+                rows.append({
+                    "指数": f"{INDEXES[code]}（{code}）",
+                    "PE(TTM)": cur["pe"],
+                    "PE分位": percentile_rank([r["pe"] for r in erps[code]], cur["pe"]),
+                    "盈利收益率": cur["ep"],
+                    "股债性价比": cur["erp"],
+                    "性价比分位": percentile_rank([r["erp"] for r in erps[code]], cur["erp"]),
+                    "解读": _erp_hint(percentile_rank([r["erp"] for r in erps[code]], cur["erp"])),
+                })
+            col_fmt = {
+                "PE(TTM)": st.column_config.NumberColumn(format="%.2f"),
+                "PE分位": st.column_config.NumberColumn(format="%.1f%%"),
+                "盈利收益率": st.column_config.NumberColumn(format="%.2f%%"),
+                "股债性价比": st.column_config.NumberColumn(format="%.2f"),
+                "性价比分位": st.column_config.NumberColumn(format="%.1f%%"),
+            }
+        else:
+            rows = []
+            for code in INDEXES:
+                if code not in dy_spreads or not dy_spreads[code]:
+                    continue
+                cur = dy_spreads[code][-1]
+                pct = percentile_rank([r["spread"] for r in dy_spreads[code]], cur["spread"])
+                rows.append({
+                    "指数": f"{INDEXES[code]}（{code}）",
+                    "股息率": cur["dp"],
+                    "10Y国债": cur["y10"],
+                    "股息率性价比": cur["spread"],
+                    "历史分位": pct,
+                    "解读": _erp_hint(pct),
+                })
+            col_fmt = {
+                "股息率": st.column_config.NumberColumn(format="%.2f%%"),
+                "10Y国债": st.column_config.NumberColumn(format="%.2f%%"),
+                "股息率性价比": st.column_config.NumberColumn(format="%.2f"),
+                "历史分位": st.column_config.NumberColumn(format="%.1f%%"),
+            }
         if rows:
-            st.dataframe(
-                pd.DataFrame(rows),
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "PE(TTM)": st.column_config.NumberColumn(format="%.2f"),
-                    "PE分位": st.column_config.NumberColumn(format="%.1f%%"),
-                    "盈利收益率": st.column_config.NumberColumn(format="%.2f%%"),
-                    "股债性价比": st.column_config.NumberColumn(format="%.2f"),
-                    "性价比分位": st.column_config.NumberColumn(format="%.1f%%"),
-                },
-            )
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config=col_fmt)
+        elif metric == "股息率":
+            st.info("全收益指数数据暂不可用，股息率口径无法计算。")
 
         sel = st.selectbox("图表指数", options=list(erps) or list(INDEXES),
                            format_func=lambda c: INDEXES.get(c, c))
         win_years = st.radio("历史窗口", ["全部", "近10年", "近5年"], horizontal=True, key="erp_win")
-        if sel in erps and erps[sel]:
+        show_close = st.toggle("叠加指数点位（右轴）", value=True, key="erp_show_close")
+
+        series = erps[sel] if metric == "盈利收益率 (1/PE)" else dy_spreads.get(sel) or []
+        if series:
             years = {"全部": None, "近10年": 10, "近5年": 5}[win_years]
             cutoff = (date.today() - timedelta(days=365 * years + 1)).isoformat() if years else None
-            shown = [r for r in erps[sel] if not cutoff or r["date"] >= cutoff]
-            cur = erps[sel][-1]
-            st.caption(f"**{INDEXES[sel]} 当前**：PE {cur['pe']:.2f}，股债性价比 "
-                       f"{cur['erp']:.2f}，历史分位 {percentile_rank([r['erp'] for r in erps[sel]], cur['erp']):.1f}%"
-                       f"（{cur['date']}）")
+            shown = [r for r in series if not cutoff or r["date"] >= cutoff]
+            cur = series[-1]
+            if metric == "盈利收益率 (1/PE)":
+                cur_txt = f"PE {cur['pe']:.2f}，股债性价比 {cur['erp']:.2f}，历史分位 " \
+                          f"{percentile_rank([r['erp'] for r in series], cur['erp']):.1f}%"
+                vkey, y_title = "erp", "股债性价比（百分点）"
+            else:
+                cur_txt = f"股息率 {cur['dp']:.2f}%，减 10Y 国债 {cur['y10']:.2f}% = {cur['spread']:.2f}，" \
+                          f"历史分位 {percentile_rank([r['spread'] for r in series], cur['spread']):.1f}%"
+                vkey, y_title = "spread", "股息率 − 10Y国债（百分点）"
+            st.caption(f"**{INDEXES[sel]} 当前**：{cur_txt}（{cur['date']}）")
+            close_map = {r["date"]: r.get("close") for r in idx_hist.get(sel) or []}
             df = pd.DataFrame({"date": pd.to_datetime([r["date"] for r in shown]),
-                               "erp": [r["erp"] for r in shown]})
-            mean = df["erp"].mean()
-            std = df["erp"].std()
+                               vkey: [r[vkey] for r in shown],
+                               "close": [close_map.get(r["date"]) for r in shown]})
+            mean = df[vkey].mean()
+            std = df[vkey].std()
 
             def _rule(y, color, dash):
-                return alt.Chart(pd.DataFrame({"erp": [y]})).mark_rule(
-                    color=color, strokeDash=dash).encode(y="erp:Q")
+                return alt.Chart(pd.DataFrame({vkey: [y]})).mark_rule(
+                    color=color, strokeDash=dash).encode(y=f"{vkey}:Q")
 
             line = alt.Chart(df).mark_line(color="#1f77b4").encode(
                 x=alt.X("date:T", axis=alt.Axis(format="%Y-%m", title=None)),
-                y=alt.Y("erp:Q", title="股债性价比（百分点）", scale=alt.Scale(zero=False)),
+                y=alt.Y(f"{vkey}:Q", title=y_title, scale=alt.Scale(zero=False),
+                        axis=alt.Axis(orient="left")),
                 tooltip=[alt.Tooltip("date:T", title="日期", format="%Y-%m-%d"),
-                         alt.Tooltip("erp:Q", title="股债性价比", format=".2f")],
+                         alt.Tooltip(f"{vkey}:Q", title=y_title, format=".2f")],
             )
-            st.altair_chart(
-                (line + _rule(mean, "#ff7f0e", [6, 3])
-                 + _rule(mean + std, "#d9d9d9", [2, 3]) + _rule(mean - std, "#d9d9d9", [2, 3])
-                 ).properties(height=360),
-                width="stretch",
-            )
-            st.caption(f"橙色虚线为区间均值 {mean:.2f}，灰色虚线为 ±1σ（{mean - std:.2f} ~ {mean + std:.2f}），按所选窗口计算。")
+            chart = (line + _rule(mean, "#ff7f0e", [6, 3])
+                     + _rule(mean + std, "#d9d9d9", [2, 3]) + _rule(mean - std, "#d9d9d9", [2, 3]))
+            if show_close:
+                close_line = alt.Chart(df).mark_line(color="#b0b0b0", size=1).encode(
+                    # x 与主图层同字段共享同一根轴；此处不可设 axis=None，否则合并后整图 x 轴被隐藏
+                    x=alt.X("date:T"),
+                    y=alt.Y("close:Q", title="指数点位", scale=alt.Scale(zero=False),
+                            axis=alt.Axis(orient="right")),
+                    tooltip=[alt.Tooltip("date:T", title="日期", format="%Y-%m-%d"),
+                             alt.Tooltip("close:Q", title="点位", format=".2f")],
+                )
+                chart = alt.layer(close_line, chart).resolve_scale(y="independent")
+            st.altair_chart(chart.properties(height=360), width="stretch")
+            st.caption(f"橙色虚线为区间均值 {mean:.2f}，灰色虚线为 ±1σ（{mean - std:.2f} ~ {mean + std:.2f}），按所选窗口计算。"
+                       + ("浅灰线为指数点位（右轴）。" if show_close else ""))
 
 # ================================================================ 利率与汇率
 with tab_rate:
