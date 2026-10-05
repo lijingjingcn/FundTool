@@ -39,22 +39,45 @@ python -m streamlit run app.py
 ```
 app.py                     # 多页应用入口（页面配置 + 侧边栏导航）
 ui/
-  ├── common.py            # 页面共享：数据客户端、本地持久化、总览行/详情渲染、高亮
+  ├── constants.py         # 全局常量：路径、查询节奏、提醒阈值（调参数只看这里）
+  ├── state.py             # 会话状态键集中定义（KEY_*）+ 本地持久化（我的基金/查询历史）
+  ├── query.py             # 查询与数据整形：原始行契约 fund_overview_row、经理目录聚合
+  ├── render.py            # 渲染层：display_row 展示格式化、详情/分组/经理视图、高亮
+  ├── sortable_table.py    # 可点表头排序的表格组件（显式排序键，纯函数生成 HTML）
   ├── page_groups.py       # 📚 分组查询页（批量查询、分组标签页、CSV 导出）
   └── page_single.py       # 🔍 单只/经理查询页（代码/名称/经理姓名、查询历史）
 fundtool/
   ├── client.py            # 天天基金接口客户端（限速、重试）
-  ├── holdings.py          # 定期报告基金经理持有份额解析
+  ├── holdings.py          # 定期报告基金经理持有份额解析（纯解析 + 缓存管线）
   ├── cache.py             # JSON 文件缓存（带 TTL）
   ├── jschallenge.py       # pdf.dfcfw.com JS 反爬挑战求解（调用 Node）
   └── solve_challenge.js   # Node 挑战脚本执行器
-tests/test_app.py          # 冒烟测试（python tests/test_app.py，需联网）
+tests/
+  ├── test_app.py          # 端到端冒烟测试（AppTest，场景互相独立，需联网）
+  ├── test_holdings_parser.py  # 报告解析器单测（离线，含真实报告文本夹具）
+  └── fixtures/            # 从真实中报 PDF 提取的“持有人信息”章节文本窗口
 我的基金.json               # 分组与基金代码（自动保存，可备份）
 查询历史.json               # 单只查询历史（自动保存，不入版本库）
 .cache/                    # 运行时缓存（可随时删除）
 启动基金工具.bat             # 双击启动（浏览器自动打开 8501）
 停止基金工具.bat             # 双击停止 8501 端口上的后台服务
 ```
+
+分层约定：`fundtool/` 是纯数据层（不依赖 streamlit）；`ui/` 按关注点分为
+常量（constants）→ 状态与持久化（state）→ 查询与数据整形（query）→ 渲染（render），
+依赖方向单向。数据行的数值字段保留原始类型（`nav_yuan` 为 float、`small` 为 bool），
+所有展示文案（`204.16亿 ⚠️`、`>100万份`、`↑2档`）统一由 `render.display_row` 格式化，
+排序键也从原始字段计算——不再从展示文本里反向提取数字。
+
+## 测试
+
+```bash
+pip install pytest          # 测试依赖（应用本身不需要）
+python -m pytest tests/ -v  # 全部 33 个测试；也可只跑 tests/test_holdings_parser.py（离线）
+```
+
+端到端测试会真实调用数据接口（首次运行需联网，之后走 `.cache/`）；解析器单测使用
+`tests/fixtures/` 下的真实报告文本窗口，完全离线。
 
 ## 关键实现说明
 

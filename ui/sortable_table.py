@@ -5,60 +5,14 @@
 且排序按字符串比较（"10亿"会排在"200亿"前面）；st.table 则不支持排序。
 内嵌 HTML + 少量原生 JS 可以两者兼得：
 - 点表头排序 / 再点切换升降序，浏览器本地完成、即时响应；
-- data-sort 属性携带语义排序键（规模数值、持有档位、升降档数），-- 等无效值恒沉底；
+- 排序键由调用方通过 sort_values 显式给出（从原始数据算数值，见 render.display_sort_values），
+  未提供键的列退回单元格文本比较，""（无效值）恒沉底；
 - 单元格底色高亮、文字可划选复制、随当前显示顺序导出 CSV。
 """
 import html as _html
-import re
 
 import pandas as pd
 import streamlit as st
-
-# 语义排序键：把展示文案换算成可比较的数值
-_SCALE_RE = re.compile(r"([\d.]+)\s*亿")
-_HOLD_RANK = {"0": 0, "0-10": 1, "10-50": 2, "50-100": 3, ">100": 4}
-
-
-def _scale_key(text):
-    m = _SCALE_RE.search(str(text))
-    return float(m.group(1)) if m else None
-
-
-def _hold_key(text):
-    v = str(text).replace("万份", "").strip()
-    if "未持有" in v:
-        return 0
-    v = v.replace("~", "-").replace("～", "-").replace("—", "-").replace("至", "-")
-    return _HOLD_RANK.get(v)
-
-
-def _change_key(text):
-    v = str(text)
-    m = re.search(r"\d+", v)
-    if v.startswith("↑"):
-        return int(m.group()) if m else None
-    if v.startswith("↓"):
-        return -int(m.group()) if m else None
-    return 0 if v == "→持平" else None
-
-
-def _num_key(text):
-    """取文案里的首个数字作排序键（如「3只」「3400天」「312.56亿」「123.45%」）"""
-    m = re.search(r"-?\d+(?:\.\d+)?", str(text))
-    return float(m.group()) if m else None
-
-
-_COLUMN_KEYS = {
-    "规模(净资产)": _scale_key,
-    "基金经理持有本基金": _hold_key,
-    "持有较上期": _change_key,
-    # 经理汇总表的列，按文案内首个数字排序
-    "本组持有": _num_key,
-    "现任基金": _num_key,
-    "在管总规模": _num_key,
-    "从业天数": _num_key,
-    "现任最佳回报": _num_key,
-}
 
 # 高亮底色（与总览表一致的半透明色，浅/深色主题都可读）
 _SMALL_BG = "rgba(229,57,53,0.45)"
@@ -133,12 +87,15 @@ function exportCSV() {
 
 
 def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
-                         title="fund_table.csv") -> str:
+                        sort_values=None, title="fund_table.csv") -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
     small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
-    mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色。"""
+    mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色；
+    sort_values：{列名: [排序键…]}，长度须与 df 行数一致，键为数字或 None（沉底）；
+    未提供键的列按单元格文本排序。"""
     small_codes = set(small_codes or ())
     mgr_change_codes = set(mgr_change_codes or ())
+    sort_values = sort_values or {}
     cols = list(df.columns)
     ths = "".join(
         f'<th data-col="{_html.escape(str(c))}" aria-sort="none" onclick="sortTable(this)">'
@@ -146,15 +103,15 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
         for c in cols
     )
     trs = []
-    for _, row in df.iterrows():
+    for ri, (_, row) in enumerate(df.iterrows()):
         tds = []
         for c in cols:
             val = "" if pd.isna(row[c]) else str(row[c])
-            keyf = _COLUMN_KEYS.get(c)
-            sort_key = keyf(val) if keyf else None
-            data_sort = "" if sort_key is None and keyf else _html.escape(val, quote=True)
-            if sort_key is not None:
-                data_sort = str(sort_key)
+            col_keys = sort_values.get(c)
+            if col_keys is not None and ri < len(col_keys):
+                data_sort = "" if col_keys[ri] is None else str(col_keys[ri])
+            else:
+                data_sort = _html.escape(val, quote=True)
             cls = ""
             if c == "规模(净资产)" and str(row.get("代码")) in small_codes:
                 cls = "small"
@@ -174,8 +131,9 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
     )
 
 
-def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None, title="fund_table.csv"):
+def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
+                          sort_values=None, title="fund_table.csv"):
     """在 Streamlit 页面上渲染可点表头排序的表格"""
     n = len(df)
     height = min(120 + 36 * n, 700)
-    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, title), height=height)
+    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title), height=height)

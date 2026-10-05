@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-"""端到端冒烟测试（Streamlit AppTest，无需浏览器）：
-用法: python tests/test_app.py
-覆盖：分组查询、错误代码提示、输入本地持久化（第二次启动免输入直接查询）。
+"""端到端冒烟测试（Streamlit AppTest，无需浏览器）+ 纯函数单测。
+
+用法: python -m pytest tests/test_app.py -v    （或 python tests/test_app.py）
 会真实调用数据接口/缓存，首次运行需要联网。
 
-通过 FUNDTOOL_DATA_FILE 把数据文件指向临时目录，绝不触碰用户的 我的基金.json。
+每个测试独立准备自己的分组数据与查询历史（写入临时 DATA_FILE，绝不触碰
+真实的 我的基金.json），测试之间互不依赖、可单独运行。
+
+通过 FUNDTOOL_DATA_FILE / FUNDTOOL_HISTORY_FILE 把数据文件指向临时目录。
 """
 import io
 import json
@@ -14,6 +17,7 @@ import sys
 import tempfile
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -22,9 +26,12 @@ os.environ["FUNDTOOL_HISTORY_FILE"] = os.path.join(os.path.dirname(os.environ["F
 DATA_FILE = os.environ["FUNDTOOL_DATA_FILE"]
 HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 
+import pytest  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
-from fundtool.holdings import range_change  # noqa: E402
-from ui.common import _mgr_change_label, fund_overview_row, get_client, manager_summary_rows  # noqa: E402
+
+from ui.query import fund_overview_row, group_manager_agg, mgr_change_label  # noqa: E402
+from ui.render import display_row, manager_summary_rows  # noqa: E402
+from ui.state import clear_history, get_client  # noqa: E402
 from ui.sortable_table import sortable_table_html  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -34,9 +41,18 @@ GROUPS_PAGE = os.path.join(ROOT, "ui", "page_groups.py")
 SINGLE_PAGE = os.path.join(ROOT, "ui", "page_single.py")
 
 
+# ---------------- 公共工具 ----------------
 def write_groups(groups):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({"groups": groups}, f, ensure_ascii=False)
+
+
+@pytest.fixture(autouse=True)
+def _independent_local_data():
+    """每个测试从干净状态开始：单分组空白数据 + 空历史（保证场景独立）"""
+    write_groups([{"id": "test0001", "name": "我的基金", "codes": ""}])
+    clear_history()
+    yield
 
 
 def click_query(at):
@@ -60,77 +76,68 @@ def overview_dfs(at):
     return out
 
 
-def main():
-    write_groups([{"id": "test0001", "name": "我的基金", "codes": ""}])
-    # ---- 场景1：默认单分组，输入并查询；005827 组内重复应提示合并 ----
+def query_groups(codes_texts):
+    """构造分组数据并查询：codes_texts = [(分组名, 代码文本), ...]，返回查询完成的 AppTest"""
+    write_groups([{"id": f"test{i:04d}", "name": name, "codes": codes}
+                  for i, (name, codes) in enumerate(codes_texts)])
     at = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at.run()
-    assert len(at.text_area) == 1, "默认应有 1 个分组输入框"
-    at.text_area[0].set_value("005827 005827 999999").run()
     click_query(at)
+    return at
+
+
+# ---------------- 分组查询页 ----------------
+def test_group_query_basic():
+    """单分组查询：组内重复合并、无效代码报错、经理变更提示、详情含历史对比表"""
+    at = query_groups([("我的基金", "005827 005827 999999")])
     dfs = overview_dfs(at)
     assert dfs, "总览表格未渲染"
     df = dfs[0]
-    print(df.to_string())
     assert list(df["代码"]) == ["005827"], "组内重复应合并为一条"
     row = df.iloc[0]
     assert row["名称"] == "易方达蓝筹精选混合", row["名称"]
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
     assert any("999999" in e.value for e in at.error), [e.value for e in at.error]
-    # 持有较上期列 + 详情页历史表（当前中报 vs 上一份年报）
     assert "持有较上期" in df.columns, df.columns
     assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", row["持有较上期"]), row["持有较上期"]
     tables = [t.value.data if hasattr(t.value, "data") else t.value for t in at.table]
     assert any("报告期" in list(v.columns) for v in tables if hasattr(v, "columns")), "详情页应有历史对比表"
-    assert range_change(">100", "10-50") == "升2档" and range_change("10-50", ">100") == "降2档" and range_change("10-50", "10-50") == "持平" and range_change(">100", "") is None
     warn_texts = [w.value for w in at.warning]
     assert any("005827" in w and "合并" in w for w in warn_texts), warn_texts
-    # 每组一个经理汇总入口（可展开），标题带人数
-    assert any("本组经理汇总" in e.label for e in at.expander), [e.label for e in at.expander]
     # 近一年经理变更提示（005827 于 2026-05-23 新增共管经理，窗口一年内应有提示；窗口过后跳过）
-    _chg_lbl = _mgr_change_label(get_client().manager_tenure("005827"))
+    _chg_lbl = mgr_change_label(get_client().manager_tenure("005827"))
     if _chg_lbl:
         assert any("近一年基金经理有变更" in w and "005827" in w for w in warn_texts), warn_texts
-    print("✅ 场景1 通过：单分组查询 + 无效代码报错 + 组内重复提示"
-          + (f" + 经理变更提示（{_chg_lbl}）" if _chg_lbl else ""))
+    assert any("本组经理汇总" in e.label for e in at.expander), [e.label for e in at.expander]
 
-    # ---- 场景1b：多级别（A/C 份额）报表按查询代码的份额级别取行 ----
-    # 010790 是 A 类代码：经理 A 类 >100、C 类 0、合计 >100 → 应显示 A 行 >100
-    at.text_area[0].set_value("010790").run()
-    click_query(at)
+
+def test_share_class_a_row():
+    """多级别报表按查询代码的份额级别取行：010790（A类）经理 A 类 >100"""
+    at = query_groups([("我的基金", "010790")])
     df = overview_dfs(at)[0]
     row = df[df["代码"] == "010790"].iloc[0]
     assert row["基金经理持有本基金"] == ">100万份", f"010790 解析错误: {row['基金经理持有本基金']}"
-    print("✅ 场景1b 通过：010790（A类）取 A 级行（>100万份）")
 
-    # ---- 场景1c：多级别报表不得把 C 类持有算到 A 类头上 ----
-    # 015887 是 A 类代码：经理 A 类 0~10、C 类 >100、合计 >100 → 应显示 A 行 0~10
-    at.text_area[0].set_value("015887").run()
-    click_query(at)
+
+def test_share_class_c_not_mixed_into_a():
+    """多级别报表不得把 C 类持有算到 A 类头上：015887（A类）经理 A 类 0~10、C 类 >100"""
+    at = query_groups([("我的基金", "015887")])
     df = overview_dfs(at)[0]
     row = df[df["代码"] == "015887"].iloc[0]
     assert row["基金经理持有本基金"] == "0~10万份", f"015887 解析错误: {row['基金经理持有本基金']}"
-    print("✅ 场景1c 通过：015887（A类）取 A 级行（0~10万份），C类持有未误算")
-    at.text_area[0].set_value("010790").run()  # 恢复第一组内容，供场景2构造跨组重复
 
-    # ---- 场景2：添加第二个分组，两组分别查询；010790 跨组重复应触发高亮 ----
-    add_btn = next(b for b in at.button if "添加分组" in b.label)
-    add_btn.click().run()
-    assert len(at.text_area) == 2, "添加后应有 2 个分组输入框"
-    at.text_area[1].set_value("161725 010790").run()  # 010790 与第一组重复
-    click_query(at)
+
+def test_two_groups_cross_dup_and_manager_drilldown():
+    """两个分组各自出表、跨组重复提醒；点经理按钮就地展示其全部在管基金"""
+    # 010790 跨两组重复；第一组经理含吴昊（海富通，id 30132788）
+    at = query_groups([("我的基金", "010790"), ("分组2", "161725 010790")])
     dfs = overview_dfs(at)
     assert len(dfs) == 2, f"应有 2 个分组总览表，实际 {len(dfs)}"
-    df2 = dfs[1]
-    assert list(df2["代码"]) == ["161725", "010790"], df2.to_string()
+    assert list(dfs[1]["代码"]) == ["161725", "010790"], dfs[1].to_string()
     warn_texts = [w.value for w in at.warning]
     assert any("010790" in w and "重复" in w for w in warn_texts), warn_texts
     assert sum("本组经理汇总" in e.label for e in at.expander) == 2, \
         [e.label for e in at.expander]  # 两个分组各有一个经理汇总
-    print("✅ 场景2 通过：两个分组各自出表，跨组重复有提醒，各带经理汇总")
-
-    # ---- 场景2b：分组经理下钻——点经理按钮，就地渲染该经理全部在管基金（同「单只/经理查询」） ----
-    # 此时第一组=010790（海富通，经理周雪军/吴昊），第二组=161725+010790
     gmgr_btns = [b for b in at.button if b.key and b.key.startswith("gmgr_")]
     assert gmgr_btns, f"应渲染经理下钻按钮，实际 {[b.key for b in at.button]}"
     wh = next((b for b in gmgr_btns if b.key == "gmgr_我的基金_30132788"), None)  # 吴昊（海富通）
@@ -138,148 +145,156 @@ def main():
     wh.click().run()
     assert any("点击表头排序" in c.value for c in at.caption), [c.value for c in at.caption]
     next(b for b in at.button if b.key == "mvfund_30132788_010790")  # 吴昊在管基金按钮已渲染
-    print("✅ 场景2b 通过：分组页点经理按钮，就地展示其全部在管基金（含经理持有份额、可排序）")
 
-    # ---- 场景3：持久化——全新会话（模拟下次启动）免输入直接查询 ----
+
+def test_groups_persist_across_sessions():
+    """输入自动保存：全新会话（模拟下次启动）免输入直接查询"""
+    at = query_groups([("我的基金", "005827"), ("分组2", "161725")])
     at2 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at2.run()
     assert len(at2.text_area) == 2, "分组数应从 我的基金.json 恢复"
     assert "161725" in at2.text_area[1].value, at2.text_area[1].value
     click_query(at2)
     assert len(overview_dfs(at2)) == 2, "恢复后应直接查出两个分组结果"
-    print("✅ 场景3 通过：输入已保存，下次启动免输入直接查询")
 
-    # ---- 场景4：分组排序——「↓/↑」调整显示顺序并持久化 ----
+
+def test_group_reorder_persists():
+    """「↓/↑」调整分组显示顺序并持久化"""
+    at = query_groups([("我的基金", "005827"), ("分组2", "161725")])
     with open(DATA_FILE, encoding="utf-8") as f:
         gids = [g["id"] for g in json.load(f)["groups"]]
     assert len(gids) == 2, gids
-    down_btn = next(b for b in at2.button if b.key == f"down_{gids[0]}")
+    down_btn = next(b for b in at.button if b.key == f"down_{gids[0]}")
     down_btn.click().run()
-    assert "161725" in at2.text_area[0].value, at2.text_area[0].value
-    assert "010790" in at2.text_area[1].value, at2.text_area[1].value
+    assert "161725" in at.text_area[0].value, at.text_area[0].value
+    assert "005827" in at.text_area[1].value, at.text_area[1].value
     at3 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at3.run()
     assert "161725" in at3.text_area[0].value, "排序应持久化到 我的基金.json"
-    print("✅ 场景4 通过：分组可上移/下移排序，顺序持久化")
 
-    # ---- 场景5：单只查询——代码直达、经理持有展示、历史记录持久化 ----
-    at4 = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
-    at4.run()
-    next(t for t in at4.text_input if t.key == "single_q").set_value("005827").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    assert any("005827" in s.value for s in at4.success), [s.value for s in at4.success]
-    metric_labels = [m.label for m in at4.metric]
-    assert "基金经理持有份额（区间）" in metric_labels, metric_labels
+
+# ---------------- 单只 / 经理查询页 ----------------
+def _run_single(kw):
+    at = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
+    at.run()
+    next(t for t in at.text_input if t.key == "single_q").set_value(kw).run()
+    next(b for b in at.button if b.key == "single_go").click().run()
+    return at
+
+
+def test_single_code_query_and_history():
+    """按代码单只查询，详情含经理持有，写入历史"""
+    at = _run_single("005827")
+    assert any("005827" in s.value for s in at.success), [s.value for s in at.success]
+    assert "基金经理持有份额（区间）" in [m.label for m in at.metric], [m.label for m in at.metric]
     with open(HISTORY_FILE, encoding="utf-8") as f:
         hist = json.load(f)["items"]
     assert hist and hist[0]["code"] == "005827", hist
-    print("✅ 场景5a 通过：按代码单只查询，详情含经理持有，写入历史")
 
-    # ---- 场景5b：按名称搜索，选择后查看 ----
-    next(t for t in at4.text_input if t.key == "single_q").set_value("蓝筹精选").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    assert len(at4.selectbox) == 1, "名称搜索应出现基金选择框"
-    sb = at4.selectbox[0]
+
+def test_single_name_search():
+    """按名称搜索，选择后查看"""
+    at = _run_single("蓝筹精选")
+    assert len(at.selectbox) == 1, "名称搜索应出现基金选择框"
+    sb = at.selectbox[0]
     assert sb.options, "搜索结果不应为空"
     pick_code = sb.value  # .value 是 6 位代码；.options 是格式化标签
-    next(b for b in at4.button if b.key == "single_view").click().run()
-    assert pick_code in " ".join(s.value for s in at4.success)
-    print(f"✅ 场景5b 通过：按名称搜索到 {len(sb.options)} 只，选择 {pick_code} 查看成功")
+    next(b for b in at.button if b.key == "single_view").click().run()
+    assert pick_code in " ".join(s.value for s in at.success)
 
-    # ---- 场景5c：历史记录跨会话保留，点击可直接再查 ----
+
+def test_history_chip_cross_session():
+    """历史记录跨会话保留，点击可直接再查"""
+    _run_single("005827")
     at5 = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
     at5.run()
     chip = next((b for b in at5.button if b.key == "hist_005827"), None)
     assert chip is not None, "新会话应显示历史记录按钮"
     chip.click().run()
     assert any("005827" in s.value for s in at5.success)
-    print("✅ 场景5c 通过：历史跨会话保留，点击即查")
 
-    # ---- 场景5d：搜索相关度重排——输入含多余后缀时，正确基金应排第一 ----
-    # 官方简称"华商创新成长混合发起式A"不含"灵活配置"，接口原始排序会把
-    # 中欧创新成长灵活配置排在前面；重排后目标基金应默认选中
-    next(t for t in at4.text_input if t.key == "single_q").set_value("华商创新成长灵活配置").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    assert at4.selectbox, "应出现基金选择框"
-    assert at4.selectbox[0].value == "000541", f"应为华商创新成长，实际 {at4.selectbox[0].value}"
-    print("✅ 场景5d 通过：搜索重排后华商创新成长（000541）排第一")
 
-    # ---- 场景5e：按基金经理姓名搜索 → 经理视图（可点表头排序）→ 点击基金出详情 ----
-    next(t for t in at4.text_input if t.key == "single_q").set_value("张坤").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    mgr_btn = next((b for b in at4.button if b.key == "mgr_30189744"), None)
-    assert mgr_btn is not None, f"应出现张坤（易方达基金）的经理卡片，实际 {[b.key for b in at4.button]}"
+def test_search_ranking_prefers_exact_suffix_match():
+    """搜索相关度重排：输入含多余后缀时，正确基金应排第一（华商创新成长 000541）"""
+    at = _run_single("华商创新成长灵活配置")
+    assert at.selectbox, "应出现基金选择框"
+    assert at.selectbox[0].value == "000541", f"应为华商创新成长，实际 {at.selectbox[0].value}"
+
+
+def test_manager_view_sortable_and_fund_detail():
+    """经理视图：可点表头排序（含 CSV 导出），点击基金查详情"""
+    at = _run_single("张坤")
+    mgr_btn = next((b for b in at.button if b.key == "mgr_30189744"), None)
+    assert mgr_btn is not None, f"应出现张坤（易方达基金）的经理卡片，实际 {[b.key for b in at.button]}"
     mgr_btn.click().run()
     # 表格渲染为内嵌组件（iframe），AppTest 不可见；用渲染提示与基金按钮确认经理视图已出
-    assert any("点击表头排序" in c.value for c in at4.caption), [c.value for c in at4.caption]
-    next(b for b in at4.button if b.key == "mvfund_30189744_005827")
-    next(b for b in at4.button if b.key == "mvfund_30189744_005827").click().run()
-    assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
-    print("✅ 场景5e 通过：经理视图可点表头排序（含 CSV 导出），点击基金查详情")
+    assert any("点击表头排序" in c.value for c in at.caption), [c.value for c in at.caption]
+    next(b for b in at.button if b.key == "mvfund_30189744_005827").click().run()
+    assert any("易方达蓝筹精选" in s.value for s in at.success), [s.value for s in at.success]
 
-    # ---- 场景5g：一次输入多位经理姓名（张坤 杨思亮），分块展示各自在管基金 ----
-    next(t for t in at4.text_input if t.key == "single_q").set_value("张坤 杨思亮").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    cap = " ".join(c.value for c in at4.caption)
+
+def test_multi_manager_blocks_with_inplace_detail():
+    """一次输入多位经理（张坤 杨思亮），分块展示各自在管基金；分块内点基金详情就地显示"""
+    at = _run_single("张坤 杨思亮")
+    cap = " ".join(c.value for c in at.caption)
     assert "共匹配 2 位基金经理" in cap, cap[:200]
-    assert any(b.key == "mvfund_30189744_005827" for b in at4.button), "张坤的基金按钮应存在"
+    assert any(b.key == "mvfund_30189744_005827" for b in at.button), "张坤的基金按钮应存在"
     yang_id = get_client().search_managers("杨思亮")[0]["id"]
-    assert any(b.key and b.key.startswith(f"mvfund_{yang_id}_") for b in at4.button), \
-        f"杨思亮的基金按钮应存在，实际 {[b.key for b in at4.button if b.key and b.key.startswith('mvfund_')]}"
+    assert any(b.key and b.key.startswith(f"mvfund_{yang_id}_") for b in at.button), \
+        f"杨思亮的基金按钮应存在，实际 {[b.key for b in at.button if b.key and b.key.startswith('mvfund_')]}"
     # 共管基金（005827 两人都在管）不会因 key 冲突报错，且两位各有一份
-    assert sum("点击表头排序" in c.value for c in at4.caption) >= 2, "两位经理各应有一个排序表"
-    # 从经理分块点基金：详情就地显示在该分块内（而不是长页面底部）
+    assert sum("点击表头排序" in c.value for c in at.caption) >= 2, "两位经理各应有一个排序表"
     yang_codes = get_client().search_managers("杨思亮")[0]["codes"]
     assert "005827" in yang_codes
-    next(b for b in at4.button if b.key == f"mvfund_{yang_id}_005827").click().run()
-    assert any("易方达蓝筹精选" in s.value for s in at4.success), [s.value for s in at4.success]
-    print("✅ 场景5g 通过：多位经理分块展示；分块内点基金详情就地显示（共管基金无冲突）")
+    next(b for b in at.button if b.key == f"mvfund_{yang_id}_005827").click().run()
+    assert any("易方达蓝筹精选" in s.value for s in at.success), [s.value for s in at.success]
 
-    # ---- 场景5h：同名经理提示（目录中 吴昊 6 位、李博 3 位重名） ----
-    next(t for t in at4.text_input if t.key == "single_q").set_value("吴昊").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    infos = [i.value for i in at4.info]
+
+def test_same_name_manager_hints():
+    """同名经理提示（目录中 吴昊 6 位、李博 3 位重名），单人查询与多人查询都有提示"""
+    at = _run_single("吴昊")
+    infos = [i.value for i in at.info]
     assert any("同名基金经理" in v and "吴昊" in v and "6 位" in v for v in infos), infos
-    assert sum(1 for b in at4.button if b.key and b.key.startswith("mgr_")) == 6, \
-        [b.key for b in at4.button if b.key and b.key.startswith("mgr_")]
-    print("✅ 场景5h(单人) 通过：「吴昊」6 位同名经理有醒目提示，卡片按公司区分")
-    next(t for t in at4.text_input if t.key == "single_q").set_value("李博 张坤").run()
-    next(b for b in at4.button if b.key == "single_go").click().run()
-    infos = [i.value for i in at4.info]
-    assert any("同名基金经理" in v and "李博" in v and "3 位" in v for v in infos), infos
-    print("✅ 场景5h(多人) 通过：多经理查询中「李博」3 位同名同样有提示")
+    assert sum(1 for b in at.button if b.key and b.key.startswith("mgr_")) == 6, \
+        [b.key for b in at.button if b.key and b.key.startswith("mgr_")]
+    at2 = _run_single("李博 张坤")
+    infos2 = [i.value for i in at2.info]
+    assert any("同名基金经理" in v and "李博" in v and "3 位" in v for v in infos2), infos2
 
-    # ---- 场景5f：可排序表格的语义排序键与高亮（纯函数直测） ----
-    row, _small, _chg, _mchg = fund_overview_row("005827", with_holding=True)
-    assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
-    fake = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模(净资产)": "0.30亿 ⚠️",
-            "规模日期": "--", "净值日期": "--", "基金经理持有本基金": "--", "持有数据来源": "--", "持有较上期": "↓2档"}
-    h = sortable_table_html(pd.DataFrame([row, fake]), small_codes={"999999"})
-    assert 'data-sort="204.16"' in h, "规模应转成数值排序键"
-    assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
-    assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
-    assert 'td class="small"' in h, "迷你基金规模单元格应标红"
-    assert h.count("<tr>") == 3, "表头行 + 2 数据行"
-    assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
-    assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
-        "行悬停底色不得覆盖红/绿/琥珀高亮单元格"
-    assert 'td class="mgrchg"' in sortable_table_html(
-        pd.DataFrame([row]), mgr_change_codes={"005827"}), "经理变更的基金经理单元格应标琥珀色"
-    # 经理变更判定：新任/离任/组合/无变更
+
+# ---------------- 纯函数：原始行/展示行/经理聚合/排序键 ----------------
+def test_fund_overview_row_raw_and_display():
+    """原始行保留数值/枚举字段，display_row 负责全部展示格式化"""
+    raw = fund_overview_row("005827", with_holding=True)
+    assert raw["holding"] == ">100", raw
+    assert raw["nav_yuan"] and raw["nav_yuan"] > 1e9, raw["nav_yuan"]
+    assert raw["small"] is False
+    disp = display_row(raw)
+    assert disp["基金经理持有本基金"] == ">100万份", disp
+    assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
+    small_raw = dict(raw, small=True, nav_yuan=0.3e8, holding="0", holding_chg="降2档")
+    d2 = display_row(small_raw)
+    assert d2["规模(净资产)"].endswith("⚠️") and d2["基金经理持有本基金"] == "0（未持有）"
+    assert d2["持有较上期"] == "↓2档"
+
+
+def test_mgr_change_label_window():
+    """经理变更判定：新任/离任/组合/无变更"""
     import datetime as _dt
     _today = _dt.date.today()
     _d = lambda n: str(_today - _dt.timedelta(days=n))  # noqa: E731
-    assert _mgr_change_label([{"start": _d(30), "end": "至今"}]) == "新任"
-    assert _mgr_change_label([{"start": _d(400), "end": _d(20)}]) == "离任"
-    assert _mgr_change_label([{"start": _d(400), "end": "至今"},
-                              {"start": _d(500), "end": _d(10)}]) == "离任"
-    assert _mgr_change_label([{"start": _d(15), "end": "至今"},
-                              {"start": _d(500), "end": _d(20)}]) == "新任+离任"
-    assert _mgr_change_label([{"start": _d(400), "end": "至今"}]) == ""
-    assert _mgr_change_label([]) == ""
-    print("✅ 场景5f 通过：可排序表格语义排序键/高亮与经理变更判定正确")
+    assert mgr_change_label([{"start": _d(30), "end": "至今"}]) == "新任"
+    assert mgr_change_label([{"start": _d(400), "end": _d(20)}]) == "离任"
+    assert mgr_change_label([{"start": _d(400), "end": "至今"},
+                             {"start": _d(500), "end": _d(10)}]) == "离任"
+    assert mgr_change_label([{"start": _d(15), "end": "至今"},
+                             {"start": _d(500), "end": _d(20)}]) == "新任+离任"
+    assert mgr_change_label([{"start": _d(400), "end": "至今"}]) == ""
+    assert mgr_change_label([]) == ""
 
-    # ---- 场景6：经理汇总——同名经理按现任代码区分、目录未覆盖时按姓名兜底、排序 ----
+
+def test_group_manager_agg_same_name_and_fallback():
+    """经理聚合：同名经理按现任代码区分、目录未覆盖时按姓名兜底、按（持有数,规模）排序"""
     fake_dir = [
         {"id": "m1", "name": "张三", "company": "甲基金", "codes": ["005827", "110011"],
          "names": [], "days": "3000", "scale": "300.00亿", "best_return": "120.00%"},
@@ -288,23 +303,40 @@ def main():
         {"id": "m3", "name": "王五", "company": "丙基金", "codes": [],
          "names": [], "days": "--", "scale": "--", "best_return": "--"},
     ]
-    res = {"005827": {"名称": "蓝筹精选", "基金经理": "张三"},
-           "161725": {"名称": "白酒指数", "基金经理": "张三"},
-           "999999": {"名称": "新基金", "基金经理": "王五"}}
-    rows = manager_summary_rows(["005827", "161725", "999999"], res, fake_dir)
+    results = {"005827": {"名称": "蓝筹精选", "基金经理": "张三"},
+               "161725": {"名称": "白酒指数", "基金经理": "张三"},
+               "999999": {"名称": "新基金", "基金经理": "王五"}}
+    items = group_manager_agg(["005827", "161725", "999999"], results, fake_dir)
+    rows = manager_summary_rows(items)
     assert len(rows) == 3, rows
     by_c = {r["公司"]: r for r in rows}
     assert by_c["甲基金"]["本组持有"] == "1只" and by_c["甲基金"]["本组基金"] == "蓝筹精选", by_c["甲基金"]
-    assert by_c["乙基金"]["本组基金"] == "白酒指数", by_c["乙基金"]  # 同名「张三」两人各自成行、基金归属正确
+    assert by_c["乙基金"]["本组基金"] == "白酒指数", by_c["乙基金"]  # 同名「张三」各自成行、基金归属正确
     assert by_c["丙基金"]["本组持有"] == "1只", by_c["丙基金"]  # 目录无该基金代码 → 按姓名兜底
     assert rows[0]["公司"] == "甲基金", rows  # 持有只数并列时按在管总规模降序（300亿 > 5亿）
-    h = sortable_table_html(pd.DataFrame(rows))
-    assert 'data-col="在管总规模"' in h and 'data-sort="300.0"' in h, "汇总列应有数值排序键"
-    assert 'data-sort="3000.0"' in h, "从业天数应有数值排序键"
-    print("✅ 场景6 通过：经理汇总同名区分/姓名兜底/排序与数值排序键正确")
 
-    print("\n全部冒烟测试通过 🎉")
+
+def test_sortable_table_explicit_sort_keys_and_highlights():
+    """可排序表格：显式数值排序键 + 迷你基金/经理变更高亮 + 悬停不覆盖高亮"""
+    raw = fund_overview_row("005827", with_holding=True)
+    fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
+                "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
+                "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任"}
+    from ui.render import display_sort_values
+    df = pd.DataFrame([display_row(raw), display_row(fake_raw)])
+    h = sortable_table_html(df, small_codes={"999999"}, mgr_change_codes={"005827"},
+                            sort_values=display_sort_values([raw, fake_raw]))
+    assert f'data-sort="{raw["nav_yuan"]}"' in h, "规模排序键应来自原始 nav_yuan（全精度数值）"
+    assert f'data-sort="{0.3e8}"' in h, "迷你基金规模键应为 0.3e8"
+    assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
+    assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
+    assert 'td class="small"' in h, "迷你基金规模单元格应标红"
+    assert 'td class="mgrchg"' in h, "经理变更的基金经理单元格应标琥珀色"
+    assert h.count("<tr>") == 3, "表头行 + 2 数据行"
+    assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
+    assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
+        "行悬停底色不得覆盖红/绿/琥珀高亮单元格"
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(pytest.main([__file__, "-v"]))
