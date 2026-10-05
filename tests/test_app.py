@@ -39,6 +39,7 @@ import pandas as pd  # noqa: E402
 # 多页应用：入口只做导航，各页面脚本可独立运行（AppTest 直接跑页面脚本）
 GROUPS_PAGE = os.path.join(ROOT, "ui", "page_groups.py")
 SINGLE_PAGE = os.path.join(ROOT, "ui", "page_single.py")
+MACRO_PAGE = os.path.join(ROOT, "ui", "page_macro.py")
 
 
 # ---------------- 公共工具 ----------------
@@ -336,6 +337,19 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
     assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
         "行悬停底色不得覆盖红/绿/琥珀高亮单元格"
+
+
+# ---------------- 宏观指标页 ----------------
+def test_macro_page_renders():
+    """宏观页：股债性价比表 + 利率/汇率/宏观指标卡（真实接口，走缓存）"""
+    at = AppTest.from_file(MACRO_PAGE, default_timeout=180).run()
+    assert not at.exception
+    labels = [m.label for m in at.metric]
+    assert any("中国10年期国债" in l for l in labels), labels
+    assert any("CPI同比" in l for l in labels), labels
+    assert any("M2同比" in l for l in labels), labels
+    assert any("股债性价比" in c for c in [df.columns for df in at.dataframe] if len(c)) or \
+        any("股债性价比" in s.value for s in at.caption), "应展示股债性价比"
 
 
 if __name__ == "__main__":

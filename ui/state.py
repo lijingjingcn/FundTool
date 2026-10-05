@@ -14,6 +14,7 @@ import uuid
 import streamlit as st
 
 from fundtool import EastFundClient, JsonCache
+from fundtool.macro import MacroClient
 from ui.constants import BASE_DIR, DATA_FILE, HISTORY_FILE, HISTORY_MAX
 
 # ---------------- st.session_state 键（集中定义，别处只引用不另造） ----------------
@@ -44,6 +45,11 @@ KEY_MANAGER_DUP = "manager_dup_names"     # 同名经理提示 {名字: 匹配�
 @st.cache_resource
 def get_client():
     return EastFundClient(JsonCache(os.path.join(BASE_DIR, ".cache")))
+
+
+@st.cache_resource
+def get_macro():
+    return MacroClient(JsonCache(os.path.join(BASE_DIR, ".cache")))
 
 
 # ---------------- 本地持久化：分组 ----------------
