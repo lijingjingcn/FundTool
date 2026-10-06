@@ -15,6 +15,7 @@ from ui.state import (  # noqa: E402
     KEY_DUP_WITHIN,
     KEY_ERRORS,
     KEY_GROUPS,
+    KEY_GROUP_TABS,
     KEY_PLAN,
     KEY_RESULTS,
     KEY_WITH_HOLDING,
@@ -179,7 +180,14 @@ if results is not None:
             for n, cs in st.session_state.get(KEY_PLAN) or []]
     non_empty = [(n, cs) for n, cs in plan if cs]
     if len(non_empty) > 1:
-        tabs = st.tabs([f"{n}（{len(cs)}只）" for n, cs in non_empty])
+        # key+on_change 让 tabs 变 stateful：选中分组存进后端会话（st.session_state），
+        # 经理下钻等长 rerun 或前端组件重建后不再弹回第一组（无 key 时选中态只在
+        # 前端 React state，组件重挂载即回到 default=第一个分组）
+        tabs = st.tabs(
+            [f"{n}（{len(cs)}只）" for n, cs in non_empty],
+            key=KEY_GROUP_TABS,
+            on_change="rerun",
+        )
         for tab, (name, codes) in zip(tabs, non_empty):
             with tab:
                 render_group(name, codes, results)
