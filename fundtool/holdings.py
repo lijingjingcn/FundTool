@@ -21,14 +21,18 @@ _HEADING_PAT = re.compile(
 )
 # 目录行的特征是标题后跟一串点号和页码
 _TOC_LINE = re.compile(r"\.{4,}|…{2,}|\. ?\. ?\. ?\. ?\.")
+# 章节标题行：行首编号 + 中文标题（如“8.5 发起式基金发起资金持有份额情况”），
+# 编号（8.5）不是区间值，不得参与 _class_map 取值/配对
+_SECTION_HEAD = re.compile(r"^\s*\d+(?:\.\d+)*\s*[\u4e00-\u9fa5§]")
 
 # 数值/区间：0、10-50、>100、＞100 等
 _NUM = r"[<>＞＜]?\s*\d[\d,，]*(?:\.\d+)?(?:\s*[-~～—至]\s*\d[\d,，]*(?:\.\d+)?)?"
 # 区间表里的合法值（万份）：必须是独立词块（前后为空白/行尾/括号），
 # 小数不超过两位、不含千分位——排除“2026年中期报告”的年份、“§9”的章节号、
-# “第 45页”的页码以及 8,038,597.09 这类精确份额数
+# “第 45页”的页码以及 8,038,597.09 这类精确份额数（数字后紧跟 逗号+数字 是千分位前缀，不是区间值，
+# 如 001791 的 8.5 表“基金经理等人员 603,826.10”，603 不得被当成区间）
 _NUM_TOKEN = re.compile(
-    r"(?:^|[\s（(])([<>＞＜]?\d{1,4}(?:\.\d{1,2})?(?:[-~～—至]\d{1,4}(?:\.\d{1,2})?)?)(?:万?份)?(?:[\s)）、,，]|$)"
+    r"(?:^|[\s（(])([<>＞＜]?\d{1,4}(?:\.\d{1,2})?(?:[-~～—至]\d{1,4}(?:\.\d{1,2})?)?)(?:万?份)?(?=[\s)）、]|$|,(?!\d)|，(?!\d))"
 )
 # 独立的“-”占位符（报告中表示无/零）
 _DASH_TOKEN = re.compile(r"(?:^|\s)[-－—](?:\s|$)")
@@ -70,7 +74,7 @@ def _class_map(lines, lo, hi):
     marks, vals, result = [], [], {}
     for i in range(lo, hi):
         line = lines[i]
-        if _TOC_LINE.search(line):
+        if _TOC_LINE.search(line) or _SECTION_HEAD.match(line):
             continue
         if "合计" in line:
             t = _val_in(line) or (i + 1 < len(lines) and _val_in(lines[i + 1])) or ""
@@ -95,35 +99,39 @@ def _class_map(lines, lo, hi):
 
 
 def _find_manager_line(lines, share_class=None):
-    """定位基金经理持有份额的值。返回 (区间值, 说明行, 各份额级别映射或 None)。
+    """定位「本基金基金经理持有本开放式基金」标签的值。返回 (区间值, 说明行, 各份额级别映射或 None)。
 
-    覆盖的版式：
-    - 单级基金：标签和值在同一行，如"本基金基金经理持有本开放式基金 >100"
-    - 多级基金（A/C 等份额级别分行披露）：优先取查询代码所属份额类别的行；
-      类别行缺失或未指定类别时取"合计"行
+    只认基金经理**本人**持有的标准栏名，不用「基金经理等人员」「高级管理人员」
+    等其他口径的行代替——那些不是同一种数据，宁缺勿错（找不到返回 None，界面显示 --）。
+
+    标准栏名允许的变形（PDF 折行/表格列打断）：
+    - 同行完整："本基金基金经理持有本开放式基金 >100"
+    - 折行："…持有本开 / 放式基金 10-50"（中间还可能插着份额级别列的行，如 010790）
+    - 被份额级别列打断（分级基金）："本基金基金经理持有 大成…A 50~100 / 本开放式基金 …C 0"
+    锚点为子串「基金经理持」——窗口内其他口径的行都不含它：
+    「高级管理人员、基金经理投资…负责人」是"基金经理投"、「基金经理等人员」是"基金经理等"。
+
+    其他版式：
+    - 多级基金：优先取查询代码所属份额类别的行；类别行缺失或未指定时取"合计"行
     - 占位"-"：表示未持有，按 0 处理（如 018554）
-    - 文字表述版式：如"……本基金基金经理未持有本基金。"
+    - 文字表述版式："……本基金基金经理未持有本基金。"（句子可能在"未持/有"之间折行）
     """
-    # 标准栏名为"本基金基金经理持有本开放式基金"（可能折行成 …持有本开/放式基金），
-    # 旧版式行名为"基金经理等人员"；逐级放宽匹配，避免窗口内其他含"基金经理"
-    # 的行（如说明文字）抢先命中
     label_idx = None
-    for pat in ("基金经理持有本", "基金经理等人员", "基金经理"):
-        for j, line in enumerate(lines):
-            if _TOC_LINE.search(line) or pat not in line:
-                continue
-            label_idx = j
-            break
-        if label_idx is not None:
-            break
+    for j, line in enumerate(lines):
+        if _TOC_LINE.search(line) or "基金经理持" not in line:
+            continue
+        label_idx = j
+        break
     if label_idx is None:
+        # 文字表述版式：先看“未持有”（未持有=0 也是基金经理本人持有的口径）
+        for j, line in enumerate(lines):
+            if _TOC_LINE.search(line) or "基金经理" not in line:
+                continue
+            joined = line + (lines[j + 1] if j + 1 < len(lines) else "")
+            if "未持有" in joined:
+                return "0", joined.strip(), None
         return None
     label = lines[label_idx]
-    # 文字表述版式：句子可能在"未持/有"之间折行，需要与下一行拼接后再判断
-    follow = lines[label_idx + 1] if label_idx + 1 < len(lines) else ""
-    joined = label + follow
-    if "未持有" in joined:
-        return "0", joined.strip(), None
     cmap = _class_map(lines, max(0, label_idx - 3), min(len(lines), label_idx + 6))
     if share_class and cmap.get(share_class):
         return cmap[share_class], f"{label.strip()} … {share_class}类 {cmap[share_class]}", cmap
@@ -228,7 +236,7 @@ def format_range(val):
     return f"{v}万份"
 
 
-_CACHE_VER = 8  # 解析/缓存策略变更时 +1，让旧缓存自动失效
+_CACHE_VER = 10  # 解析/缓存策略变更时 +1，让旧缓存自动失效（v10：只认“本基金基金经理持有本开放式基金”标准栏名，不再用“基金经理等人员”等替代）
 
 # 区间档位：经理持有是区间披露，档位有序，用于两期对比
 _RANK = {"0": 0, "0-10": 1, "10-50": 2, "50-100": 3, ">100": 4}

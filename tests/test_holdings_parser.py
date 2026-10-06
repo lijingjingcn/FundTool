@@ -19,6 +19,7 @@ from fundtool.holdings import (  # noqa: E402
     _class_map,
     _find_employees_exact,
     _find_manager_line,
+    _range_in,
     format_range,
     parse_manager_holding,
     range_change,
@@ -55,6 +56,19 @@ def test_real_005827_single_class_value_on_label_line():
     assert cmap is None
 
 
+def test_real_001791_label_split_by_class_column_and_85_trap():
+    """分级表标签被份额级别列打断（本基金基金经理持有 大成…A 50~100 / 本开放式基金 …C 0）：
+    仍须命中 8.4 的经理区间行，不得落到 8.5 发起资金表的同名行（基金经理等人员 603,826.10）"""
+    lines = fixture_lines("001791_holders.txt")
+    val_a, line_a, cmap = _find_manager_line(lines, "A")
+    assert val_a == "50~100", (val_a, line_a, cmap)
+    assert cmap == {"A": "50~100", "C": "0", "合计": "50~100"}, cmap
+    val_all, _, _ = _find_manager_line(lines, None)
+    assert val_all == "50~100"  # 无份额类别时取合计
+    val_c, _, _ = _find_manager_line(lines, "C")
+    assert val_c == "0"
+
+
 # ---------------- 合成版式 ----------------
 def test_label_and_value_same_line():
     lines = ["9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
@@ -69,6 +83,16 @@ def test_prose_not_held_with_folded_line():
     lines = ["报告期内本基金基金经理未持", "有本基金。"]
     val, _, _ = _find_manager_line(lines)
     assert val == "0"
+
+
+def test_no_fallback_to_other_holder_rows():
+    """只有「基金经理等人员/高级管理人员」等其他口径的行时不得代替：宁缺勿错返回 None"""
+    lines = [
+        "8.4 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "高级管理人员、基金经理投资和研究部门负责人持有本开放式基金 10-50",
+        "基金经理等人员 603,826.10 3.01 - - -",   # 8.5 发起资金表的行
+    ]
+    assert _find_manager_line(lines) is None
 
 
 def test_dash_placeholder_means_zero():
@@ -91,6 +115,13 @@ def test_toc_lines_do_not_pollute_class_map():
     lines = ["8.3 从业人员持有本开放式基金……25", "A >100", "合计 50-100"]
     cmap = _class_map(lines, 0, len(lines))
     assert cmap == {"A": ">100", "合计": "50-100"}
+
+
+def test_range_token_rejects_thousands_separator_prefix():
+    """千分位精确数的前缀不得被当成区间值（603,826.10 的 603、10,605,604.05 的 10）"""
+    assert _range_in("基金经理等人员 603,826.10 3.01 - - -") != "603"
+    assert _range_in("合计 10,605,604.05 52.80") != "10"
+    assert _range_in("本基金基金经理持有 大成绝对收益混合发起A 50~100") == "50~100"
 
 
 def test_employees_exact_number_after_label():
@@ -132,6 +163,7 @@ _REAL_PDFS = [
     ("010790", "A", ">100", "AN202608311828785398"),
     ("015887", "A", "0~10", "AN202608281828578985"),
     ("005827", None, ">100", "AN202608311828748204"),
+    ("001791", "A", "50~100", "AN202608281828589065"),
 ]
 
 
