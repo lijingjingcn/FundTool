@@ -191,6 +191,10 @@ if results is not None:
             on_change="rerun",
         )
         for tab, (name, codes) in zip(tabs, non_empty):
+            # stateful tabs 配套 tab.open：只渲染选中分组。切换分组会触发整页 rerun，
+            # 若所有分组都渲染，rerun 要重画全部大表/详情/iframe，切换明显卡顿
+            if not tab.open:
+                continue
             with tab:
                 render_group(name, codes, results)
     elif len(non_empty) == 1:

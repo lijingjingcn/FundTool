@@ -18,7 +18,13 @@ from fundtool import (
     range_rank,
 )
 from ui.constants import HISTORY_N, SMALL_NAV_YUAN
-from ui.query import fund_overview_row, group_manager_agg, manager_dir_snapshot, mgr_change_label
+from ui.query import (
+    fund_overview_row,
+    group_manager_agg,
+    manager_dir_index,
+    manager_dir_snapshot,
+    mgr_change_label,
+)
 from ui.sortable_table import render_sortable_table
 from ui.state import (
     KEY_CODE_GROUPS,
@@ -429,7 +435,7 @@ def render_manager_drilldown(name, items):
 def render_group(name, codes, results):
     """一个分组的结果：总览表 + 经理汇总/下钻 + 每只基金详情。重复的基金整行高亮。
 
-    经理目录聚合只算一次，汇总表与下钻按钮共用（目录匹配是 全目录×基金数 的扫描）。"""
+    经理目录聚合只算一次，汇总表与下钻按钮共用；目录索引会话级缓存，多组 rerun 不重建。"""
     dup_codes = st.session_state.get(KEY_DUP_CODES) or set()
     code_groups = st.session_state.get(KEY_CODE_GROUPS) or {}
     dup_within = (st.session_state.get(KEY_DUP_WITHIN) or {}).get(name, {})
@@ -459,7 +465,7 @@ def render_group(name, codes, results):
         if mgr_dir is None:
             st.warning("👥 基金经理目录获取失败，本组经理汇总暂不可用（网络恢复后重开本页即可）")
         else:
-            items = group_manager_agg(codes, results, mgr_dir)
+            items = group_manager_agg(codes, results, mgr_dir, index=manager_dir_index())
             render_manager_summary(name, items)
             render_manager_drilldown(name, items)
     else:

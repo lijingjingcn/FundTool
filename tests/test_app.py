@@ -29,12 +29,18 @@ HISTORY_FILE = os.environ["FUNDTOOL_HISTORY_FILE"]
 import pytest  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
-from ui.query import fund_overview_row, group_manager_agg, mgr_change_label  # noqa: E402
+from ui.query import (  # noqa: E402
+    build_mgr_dir_index,
+    fund_overview_row,
+    group_manager_agg,
+    mgr_change_label,
+)
 from ui.render import display_row, manager_summary_rows, pct  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_MANAGER,
     KEY_DETAIL_PAGE,
     KEY_DETAIL_SCOPE,
+    KEY_GROUP_TABS,
     KEY_SINGLE_CODE,
     clear_history,
     get_client,
@@ -95,6 +101,12 @@ def query_groups(codes_texts):
     return at
 
 
+def switch_group(at, label):
+    """切换分组标签页（stateful tabs 只渲染选中分组）：预置选中标签后重跑页面脚本"""
+    at.session_state[KEY_GROUP_TABS] = label
+    at.run()
+
+
 # ---------------- 分组查询页 ----------------
 def test_group_query_basic():
     """单分组查询：组内重复合并、无效代码报错、经理变更提示、详情含历史对比表"""
@@ -137,16 +149,17 @@ def test_share_class_c_not_mixed_into_a():
 
 
 def test_two_groups_cross_dup_and_manager_drilldown():
-    """两个分组各自出表、跨组重复提醒；点经理按钮就地展示其全部在管基金"""
+    """两个分组各自出表（切换分组时渲染）、跨组重复提醒；点经理按钮就地展示其全部在管基金"""
     # 010790 跨两组重复；第一组经理含吴昊（海富通，id 30132788）
     at = query_groups([("我的基金", "010790"), ("分组2", "161725 010790")])
+    # stateful tabs 只渲染选中分组（默认第一组），切换时整页 rerun 只重画目标组
     dfs = overview_dfs(at)
-    assert len(dfs) == 2, f"应有 2 个分组总览表，实际 {len(dfs)}"
-    assert list(dfs[1]["代码"]) == ["161725", "010790"], dfs[1].to_string()
+    assert len(dfs) == 1, f"只应渲染选中的第一组，实际 {len(dfs)}"
+    assert list(dfs[0]["代码"]) == ["010790"], dfs[0].to_string()
     warn_texts = [w.value for w in at.warning]
     assert any("010790" in w and "重复" in w for w in warn_texts), warn_texts
-    assert sum("本组经理汇总" in e.label for e in at.expander) == 2, \
-        [e.label for e in at.expander]  # 两个分组各有一个经理汇总
+    assert sum("本组经理汇总" in e.label for e in at.expander) == 1, \
+        [e.label for e in at.expander]  # 选中分组一个经理汇总，另一组未渲染
     gmgr_btns = [b for b in at.button if b.key and b.key.startswith("gmgr_")]
     assert gmgr_btns, f"应渲染经理下钻按钮，实际 {[b.key for b in at.button]}"
     wh = next((b for b in gmgr_btns if b.key == "gmgr_我的基金_30132788"), None)  # 吴昊（海富通）
@@ -157,17 +170,28 @@ def test_two_groups_cross_dup_and_manager_drilldown():
     # 分组页点经理视图内的基金：详情就地显示在该经理视图内（页面归属 groups）
     mv.click().run()
     assert any("010790" in s.value for s in at.success), [s.value for s in at.success]
+    # 切换到第二组：该组渲染（表+经理汇总），第一组不再渲染，经理视图不跨组遗留
+    switch_group(at, "分组2（2只）")
+    dfs = overview_dfs(at)
+    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["161725", "010790"], dfs[0].to_string()
+    assert sum("本组经理汇总" in e.label for e in at.expander) == 1, [e.label for e in at.expander]
+    assert not any(b.key and b.key.startswith("mvfund_") for b in at.button), \
+        "第一组的经理视图（下钻）不应出现在第二组"
 
 
 def test_groups_persist_across_sessions():
-    """输入自动保存：全新会话（模拟下次启动）免输入直接查询"""
+    """输入自动保存：全新会话（模拟下次启动）免输入直接查询，切换分组均可查"""
     at = query_groups([("我的基金", "005827"), ("分组2", "161725")])
     at2 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at2.run()
     assert len(at2.text_area) == 2, "分组数应从 我的基金.json 恢复"
     assert "161725" in at2.text_area[1].value, at2.text_area[1].value
     click_query(at2)
-    assert len(overview_dfs(at2)) == 2, "恢复后应直接查出两个分组结果"
+    dfs = overview_dfs(at2)
+    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["005827"], "恢复后直接查出选中分组结果"
+    switch_group(at2, "分组2（1只）")
+    dfs = overview_dfs(at2)
+    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["161725"], dfs[0].to_string()
 
 
 def test_group_reorder_persists():
@@ -399,6 +423,10 @@ def test_group_manager_agg_same_name_and_fallback():
     assert by_c["乙基金"]["本组基金"] == "白酒指数", by_c["乙基金"]  # 同名「张三」各自成行、基金归属正确
     assert by_c["丙基金"]["本组持有"] == "1只", by_c["丙基金"]  # 目录无该基金代码 → 按姓名兜底
     assert rows[0]["公司"] == "甲基金", rows  # 持有只数并列时按在管总规模降序（300亿 > 5亿）
+    # 显式传入索引（render_group 的用法）与内部现建索引结果一致
+    items_idx = group_manager_agg(["005827", "161725", "999999"], results, fake_dir,
+                                   index=build_mgr_dir_index(fake_dir))
+    assert items_idx == items
 
 
 def test_sortable_table_explicit_sort_keys_and_highlights():

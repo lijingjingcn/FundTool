@@ -14,7 +14,7 @@ import streamlit as st  # 只用 st.session_state：经理目录的会话级快�
 
 from fundtool import FundApiError, get_manager_holding, get_manager_holding_history
 from ui.constants import BATCH_PAUSE, BATCH_SIZE, HISTORY_N, MGR_CHANGE_DAYS, SMALL_NAV_YUAN
-from ui.state import KEY_MGR_DIR, get_client
+from ui.state import KEY_MGR_DIR, KEY_MGR_INDEX, get_client
 
 
 # ---------------- 输入解析 ----------------
@@ -169,19 +169,46 @@ def manager_dir_snapshot():
     return st.session_state[KEY_MGR_DIR]
 
 
-def group_manager_agg(codes, results, mgr_dir):
+def build_mgr_dir_index(mgr_dir):
+    """经理目录 -> (代码->经理行列表, 姓名->经理行列表) 索引（纯函数，便于测试）。
+    聚合用查表代替全目录扫描：约 4300 位经理 x 组内基金数，扫描每组几十毫秒，
+    多分组 rerun 时累计到几百毫秒；索引一次构建约 10 毫秒，之后查表近零。"""
+    by_code, by_name = {}, {}
+    for r in mgr_dir or []:
+        for c in r.get("codes") or []:
+            by_code.setdefault(c, []).append(r)
+        by_name.setdefault(r.get("name"), []).append(r)
+    return by_code, by_name
+
+
+def manager_dir_index():
+    """目录索引的会话级快照（KEY_MGR_INDEX），多分组共用一次构建；
+    目录获取失败返回 None（聚合会退回自己现建索引）。"""
+    if st.session_state.get(KEY_MGR_INDEX) is None:
+        mgr_dir = manager_dir_snapshot()
+        if mgr_dir is None:
+            return None
+        st.session_state[KEY_MGR_INDEX] = build_mgr_dir_index(mgr_dir)
+    return st.session_state[KEY_MGR_INDEX]
+
+
+def group_manager_agg(codes, results, mgr_dir, index=None):
     """分组与经理目录的聚合（纯函数，便于测试）。
     返回 [{mgr: 目录行, funds: [(代码, 名称)]}]，按（本组持有只数, 在管规模）降序。
     经理定位优先用「基金代码 ∈ 经理现任代码列表」精确匹配——同名经理天然按人区分；
-    该基金在目录里没有记录时（新基金/目录最多 7 天未刷新），按姓名精确匹配兜底。"""
+    该基金在目录里没有记录时（新基金/目录最多 7 天未刷新），按姓名精确匹配兜底。
+    index 为 build_mgr_dir_index 的结果（多分组共用）；缺省时内部现建（单次调用场景）。"""
+    if index is None:
+        index = build_mgr_dir_index(mgr_dir)
+    by_code, by_name = index
     agg = {}  # 经理ID -> {"mgr": 目录行, "funds": [(代码, 名称)]}
     for code in codes:
         if code not in results:
             continue
-        hits = [r for r in mgr_dir if code in (r.get("codes") or [])]
+        hits = by_code.get(code) or []
         if not hits:
             names = {n for n in str(results[code].get("基金经理") or "").split("、") if n and n != "--"}
-            hits = [r for r in mgr_dir if r.get("name") in names]
+            hits = [r for n in names for r in by_name.get(n) or []]
         for r in hits:
             funds = agg.setdefault(r["id"], {"mgr": r, "funds": []})["funds"]
             if code not in [c for c, _ in funds]:

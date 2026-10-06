@@ -28,6 +28,7 @@ KEY_DUP_CODES = "dup_codes"        # 跨分组重复出现的代码集合
 KEY_CODE_GROUPS = "code_groups"    # {代码: [出现的分组名]}
 KEY_DUP_WITHIN = "dup_within"      # {分组名: {代码: 输入次数}} 组内重复输入
 KEY_MGR_DIR = "mgr_dir"            # 经理目录的会话级快照（多分组共用一次解析结果）
+KEY_MGR_INDEX = "mgr_index"        # 经理目录的（代码/姓名->行）索引快照，聚合查表用
 KEY_GROUP_MGR_VIEW = "group_mgr_view"  # 分组页经理下钻 {"group": 分组名, "mgr": 目录行}
 KEY_GROUP_TABS = "group_tabs"      # 分组结果 st.tabs 的选中分组（stateful：存后端会话，防止经理查询等
                                     # 长 rerun/组件重建后弹回第一组；需 streamlit>=1.63 的 tabs key/on_change）
