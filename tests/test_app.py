@@ -297,19 +297,27 @@ def test_same_name_manager_hints():
 
 # ---------------- 纯函数：原始行/展示行/经理聚合/排序键 ----------------
 def test_parse_period_returns():
-    """阶段涨幅解析：Y/3Y/6Y/1N -> r1m/r3m/r6m/r1y；空串（未满期）与其他期间忽略"""
+    """阶段涨幅解析：Y/3Y/6Y/1N/JN/3N/5N -> r1m/r3m/r6m/r1y/rytd/r3y/r5y；空串（未满期）忽略"""
     datas = [
         {"title": "Z", "syl": "1.23"},          # 近1周：不用
         {"title": "Y", "syl": "-4.07"},
         {"title": "3Y", "syl": "-4.58"},
         {"title": "6Y", "syl": ""},              # 未满 6 月
         {"title": "1N", "syl": "-28.73"},
-        {"title": "JN", "syl": "-21.75"},        # 今年以来：不用
+        {"title": "JN", "syl": "-21.75"},
+        {"title": "3N", "syl": "-25.78"},
+        {"title": "5N", "syl": ""},              # 未满 5 年
+        {"title": "2N", "syl": "-24.58"},        # 近2年：不用
         {"title": "LN", "syl": None},            # 成立来：不用
     ]
-    assert parse_period_returns(datas) == {"r1m": -4.07, "r3m": -4.58, "r6m": None, "r1y": -28.73}
-    assert parse_period_returns([]) == {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
-    assert parse_period_returns(None) == {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
+    assert parse_period_returns(datas) == {
+        "r1m": -4.07, "r3m": -4.58, "r6m": None, "r1y": -28.73,
+        "rytd": -21.75, "r3y": -25.78, "r5y": None,
+    }
+    empty = {"r1m": None, "r3m": None, "r6m": None, "r1y": None,
+             "rytd": None, "r3y": None, "r5y": None}
+    assert parse_period_returns([]) == empty
+    assert parse_period_returns(None) == empty
 
 
 def test_pct_format():
@@ -322,13 +330,14 @@ def test_pct_format():
 
 
 def test_highlight_changes_coloring():
-    """涨跌着色：持有变化列 ↑绿↓红；阶段涨幅列 正绿负红、-- 不着色；其他列不着色"""
-    from ui.render import _CHG_DOWN_BG, _CHG_UP_BG, _highlight_changes
+    """涨跌着色：持有变化列 ↑绿底↓红底；阶段涨幅列 正红字负绿字（A 股红涨绿跌，文字色）、-- 不着色；其他列不着色"""
+    from ui.render import _CHG_DOWN_BG, _CHG_UP_BG, _RET_DOWN_FG, _RET_UP_FG, _highlight_changes
     ret = _highlight_changes(pd.Series(["-4.07%", "1.50%", "--"], name="近1月"))
-    assert ret == [_CHG_DOWN_BG, _CHG_UP_BG, ""], ret
+    assert ret == [_RET_DOWN_FG, _RET_UP_FG, ""], ret
+    assert _RET_UP_FG.startswith("color:") and _RET_DOWN_FG.startswith("color:"), "阶段涨幅应为文字色"
     chg = _highlight_changes(pd.Series(["↑2档", "↓1档", "→持平"], name="持有较上期"))
     assert chg == [_CHG_UP_BG, _CHG_DOWN_BG, ""], chg
-    assert _highlight_changes(pd.Series(["1.50%", "--"], name="近3月")) == [_CHG_UP_BG, ""]
+    assert _highlight_changes(pd.Series(["1.50%", "--"], name="近3月")) == [_RET_UP_FG, ""]
     assert _highlight_changes(pd.Series(["x", "y"], name="名称")) == ["", ""]
 
 
@@ -338,18 +347,20 @@ def test_fund_overview_row_raw_and_display():
     assert raw["holding"] == ">100", raw
     assert raw["nav_yuan"] and raw["nav_yuan"] > 1e9, raw["nav_yuan"]
     assert raw["small"] is False
-    assert isinstance(raw["r1y"], float), raw  # 老基金四期阶段涨幅都应拿到数值
-    assert all(isinstance(raw[k], float) for k in ("r1m", "r3m", "r6m")), raw
+    assert isinstance(raw["r1y"], float), raw  # 老基金各期阶段涨幅都应拿到数值
+    assert all(isinstance(raw[k], float) for k in ("r1m", "r3m", "r6m", "rytd", "r3y", "r5y")), raw
     disp = display_row(raw)
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
     assert disp["近1年"] == pct(raw["r1y"]) and disp["近1年"].endswith("%"), disp
+    assert disp["今年以来"] == pct(raw["rytd"]) and disp["近5年"] == pct(raw["r5y"]), disp
     small_raw = dict(raw, small=True, nav_yuan=0.3e8, holding="0", holding_chg="降2档")
     d2 = display_row(small_raw)
     assert d2["规模(净资产)"].endswith("⚠️") and d2["基金经理持有本基金"] == "0（未持有）"
     assert d2["持有较上期"] == "↓2档"
-    d3 = display_row(dict(raw, r1m=None, r3m=None, r6m=None, r1y=None))
-    assert d3["近1月"] == "--" and d3["近1年"] == "--", d3  # 未满期/获取失败兜底
+    _none7 = {k: None for k in ("r1m", "r3m", "r6m", "r1y", "rytd", "r3y", "r5y")}
+    d3 = display_row(dict(raw, **_none7))
+    assert d3["近1月"] == "--" and d3["近5年"] == "--", d3  # 未满期/获取失败兜底
 
 
 def test_mgr_change_label_window():
@@ -405,8 +416,10 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert f'data-sort="{0.3e8}"' in h, "迷你基金规模键应为 0.3e8"
     assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
     assert 'data-sort="-28.73"' in h and 'data-sort="1.5"' in h, "阶段涨幅列应为数值排序键"
-    assert '<td class="down" data-sort="-28.73"' in h, "负收益应红底"
-    assert '<td class="up" data-sort="1.5"' in h, "正收益应绿底"
+    assert '<td class="ret-down" data-sort="-28.73"' in h, "负收益应红字"
+    assert '<td class="ret-up" data-sort="1.5"' in h, "正收益应绿字"
+    assert "td.ret-up { color: #E53935; }" in h and "td.ret-down { color: #3FB950; }" in h, \
+        "阶段涨幅文字色样式（正收益红/负收益绿，含深色主题）应存在"
     assert '<td class="" data-sort=""' in h, "未满期（--）不着色且排序沉底"
     assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"

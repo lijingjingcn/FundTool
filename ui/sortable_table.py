@@ -36,6 +36,8 @@ th .arr { display: inline-block; width: 1.1em; color: #5a6b81; font-weight: 400;
 td { padding: 6px 9px; white-space: nowrap; border-bottom: 1px solid #e6e9ee; color: #26313f; }
 td.small { background: __SMALL__; } td.up { background: __UP__; } td.down { background: __DOWN__; }
 td.mgrchg { background: rgba(255,170,0,0.45); }
+/* 阶段涨幅：正收益红字 / 负收益绿字（A 股习惯红涨绿跌，文字色而非底色） */
+td.ret-up { color: #E53935; } td.ret-down { color: #2EA043; }
 /* 行悬停底色不覆盖高亮单元格（红/绿/琥珀提示悬停时保持可见） */
 tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg) { background: rgba(120,140,170,0.10); }
 @media (prefers-color-scheme: dark) {
@@ -43,6 +45,7 @@ tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg) { background: rgba(120,
   th:hover { background: #2a3648; }
   th .arr { color: #9db0ca; }
   td { color: #cfd7e3; border-bottom-color: #2c3646; }
+  td.ret-up { color: #F85149; } td.ret-down { color: #3FB950; }
 }
 """.replace("__SMALL__", _SMALL_BG).replace("__UP__", _UP_BG).replace("__DOWN__", _DOWN_BG)
 
@@ -119,9 +122,9 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                 cls = "mgrchg"
             elif c in ("持有较上期", "较上期"):
                 cls = "up" if val.startswith("↑") else "down" if val.startswith("↓") else ""
-            elif c in ("近1月", "近3月", "近6月", "近1年"):
-                # 阶段涨幅：正绿负红（同持有变化的绿=好红=差），--（未满期/无数据）不着色
-                cls = "down" if val.startswith("-") and val != "--" else "up" if val not in ("--", "") else ""
+            elif c in ("近1月", "近3月", "近6月", "近1年", "今年以来", "近3年", "近5年"):
+                # 阶段涨幅：正绿字负红字（文字色），--（未满期/无数据）不着色
+                cls = "ret-down" if val.startswith("-") and val != "--" else "ret-up" if val not in ("--", "") else ""
             tds.append(f'<td class="{cls}" data-sort="{data_sort}">{_html.escape(val)}</td>')
         trs.append("<tr>" + "".join(tds) + "</tr>")
     return (

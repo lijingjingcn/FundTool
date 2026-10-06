@@ -45,14 +45,17 @@ def _search_rel_rank(name, kw):
     return 5
 
 
-# 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N=近1年（年=nian）
-_PERIOD_KEYS = {"Y": "r1m", "3Y": "r3m", "6Y": "r6m", "1N": "r1y"}
+# 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N/3N/5N=近1/3/5年（年=nian），
+# JN=今年以来
+_PERIOD_KEYS = {"Y": "r1m", "3Y": "r3m", "6Y": "r6m", "1N": "r1y", "JN": "rytd", "3N": "r3y", "5N": "r5y"}
+
+_PERIOD_FIELDS = tuple(_PERIOD_KEYS.values())
 
 
 def parse_period_returns(datas):
-    """阶段涨幅接口的 Datas 列表 -> {'r1m'/'r3m'/'r6m'/'r1y': float|None}（单位 %）。
+    """阶段涨幅接口的 Datas 列表 -> {近1月r1m/近3月r3m/近6月r6m/近1年r1y/今年rytd/近3年r3y/近5年r5y: float|None}（单位 %）。
     纯函数，便于离线测试。syl 为空串（新基金未满该期）或非数字时记 None。"""
-    out = {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
+    out = dict.fromkeys(_PERIOD_FIELDS)
     for it in datas or []:
         key = _PERIOD_KEYS.get(it.get("title"))
         if not key:
@@ -127,9 +130,10 @@ class EastFundClient:
         return datas
 
     def period_returns(self, code):
-        """阶段涨幅（%）：{'r1m': 近1月, 'r3m': 近3月, 'r6m': 近6月, 'r1y': 近1年}，
-        各期 float|None（新基金未满该期为 None）。与基本信息同样缓存 12 小时。"""
-        cached = self.cache.get("period", code, ttl=12 * 3600)
+        """阶段涨幅（%）：近1月/近3月/近6月/近1年/今年以来/近3年/近5年
+        （r1m/r3m/r6m/r1y/rytd/r3y/r5y），各期 float|None（新基金未满该期为 None）。
+        与基本信息同样缓存 12 小时。"""
+        cached = self.cache.get("period_v2", code, ttl=12 * 3600)
         if cached is not None:
             return cached
         r = self._get(
@@ -143,7 +147,7 @@ class EastFundClient:
             },
         )
         out = parse_period_returns((r.json() or {}).get("Datas"))
-        self.cache.set("period", code, out)
+        self.cache.set("period_v2", code, out)
         return out
 
     def search_funds(self, keyword):

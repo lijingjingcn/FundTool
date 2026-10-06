@@ -87,6 +87,9 @@ def display_row(row):
         "近3月": pct(row.get("r3m")),
         "近6月": pct(row.get("r6m")),
         "近1年": pct(row.get("r1y")),
+        "今年以来": pct(row.get("rytd")),
+        "近3年": pct(row.get("r3y")),
+        "近5年": pct(row.get("r5y")),
         "基金经理持有本基金": format_range(row.get("holding")) or "--",
         "持有数据来源": row.get("holding_src") or "--",
         "持有较上期": _fmt_change(row.get("holding_chg")),
@@ -101,6 +104,9 @@ def display_sort_values(rows):
         "近3月": [r.get("r3m") for r in rows],
         "近6月": [r.get("r6m") for r in rows],
         "近1年": [r.get("r1y") for r in rows],
+        "今年以来": [r.get("rytd") for r in rows],
+        "近3年": [r.get("r3y") for r in rows],
+        "近5年": [r.get("r5y") for r in rows],
         "基金经理持有本基金": [range_rank(r.get("holding")) for r in rows],
         "持有较上期": [_chg_sort_key(r.get("holding_chg")) for r in rows],
     }
@@ -242,6 +248,7 @@ def render_manager_funds(m, page=""):
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
+                       "rytd": None, "r3y": None, "r5y": None,
                        "holding": "", "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
             else:
                 if row["small"]:
@@ -278,9 +285,13 @@ def render_manager_funds(m, page=""):
 _DUP_BG = "background-color: rgba(255,170,0,0.32)"
 # 迷你基金（净资产<0.5亿）规模单元格的底色（半透明红色）
 _SMALL_BG = "background-color: rgba(229,57,53,0.45)"
-# 经理持有份额变化：升档绿色 / 降档红色
+# 经理持有份额变化：升档绿色 / 降档红色（单元格底色）
 _CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
 _CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
+# 阶段涨幅（近1月/3月/6月/1年/今年/3年/5年）：正收益红字 / 负收益绿字
+# （A 股习惯红涨绿跌；注意与持有较上期的绿=增持红=减持是两套语义）
+_RET_UP_FG = "color: #E53935"
+_RET_DOWN_FG = "color: #2EA043"
 # 近一年基金经理变更：基金经理单元格琥珀色
 _MGRCHG_BG = "background-color: rgba(255,170,0,0.45)"
 
@@ -315,17 +326,17 @@ def _highlight_small_scale(small_codes, codes):
 
 
 def _highlight_changes(col):
-    """涨跌单元格着色（按列）：「持有较上期/较上期」↑绿 ↓红；
-    阶段涨幅列（近1月/近3月/近6月/近1年）正绿 负红（沿用绿=好红=差的既有高亮语义）；
+    """涨跌单元格着色（按列）：「持有较上期/较上期」↑绿底 ↓红底；
+    阶段涨幅列（近1月/近3月/近6月/近1年/今年以来/近3年/近5年）正绿字 负红字（绿=好红=差的既有语义）；
     其他列与 --（未满期/无数据）不着色"""
     if col.name in ("持有较上期", "较上期"):
         def bg(v):
             return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
-    elif col.name in ("近1月", "近3月", "近6月", "近1年"):
+    elif col.name in ("近1月", "近3月", "近6月", "近1年", "今年以来", "近3年", "近5年"):
         def bg(v):
             if v in ("--", ""):
                 return ""
-            return _CHG_DOWN_BG if v.startswith("-") else _CHG_UP_BG
+            return _RET_DOWN_FG if v.startswith("-") else _RET_UP_FG
     else:
         return [""] * len(col)
     return [bg(str(v)) for v in col]

@@ -76,7 +76,7 @@ def fund_overview_row(code, with_holding=True):
     - 原始值（渲染层用 render.display_row 格式化）：
       nav_yuan    float|None  期末净资产（元）
       small       bool        迷你基金（净资产 < SMALL_NAV_YUAN，清盘风险）
-      r1m/r3m/r6m/r1y float|None  近1月/3月/6月/1年阶段涨幅（%）
+      r1m/r3m/r6m/r1y/rytd/r3y/r5y float|None  近1月/3月/6月/1年/今年以来/近3年/近5年阶段涨幅（%）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
       holding_src str         持有数据来源（'2026-08-31中报'）或失败原因
       holding_chg str         较上期变化（'升N档'/'降N档'/'持平'），''=无对比
@@ -104,6 +104,9 @@ def fund_overview_row(code, with_holding=True):
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),
         "r1y": ret.get("r1y"),
+        "rytd": ret.get("rytd"),
+        "r3y": ret.get("r3y"),
+        "r5y": ret.get("r5y"),
         "holding": "",
         "holding_src": "",
         "holding_chg": "",
