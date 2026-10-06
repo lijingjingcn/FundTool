@@ -45,6 +45,26 @@ def _search_rel_rank(name, kw):
     return 5
 
 
+# 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N=近1年（年=nian）
+_PERIOD_KEYS = {"Y": "r1m", "3Y": "r3m", "6Y": "r6m", "1N": "r1y"}
+
+
+def parse_period_returns(datas):
+    """阶段涨幅接口的 Datas 列表 -> {'r1m'/'r3m'/'r6m'/'r1y': float|None}（单位 %）。
+    纯函数，便于离线测试。syl 为空串（新基金未满该期）或非数字时记 None。"""
+    out = {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
+    for it in datas or []:
+        key = _PERIOD_KEYS.get(it.get("title"))
+        if not key:
+            continue
+        v = it.get("syl")
+        try:
+            out[key] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
 class EastFundClient:
     def __init__(self, cache, rate_limit=0.25, timeout=20):
         self.cache = cache
@@ -105,6 +125,26 @@ class EastFundClient:
             return None
         self.cache.set("basic", code, datas)
         return datas
+
+    def period_returns(self, code):
+        """阶段涨幅（%）：{'r1m': 近1月, 'r3m': 近3月, 'r6m': 近6月, 'r1y': 近1年}，
+        各期 float|None（新基金未满该期为 None）。与基本信息同样缓存 12 小时。"""
+        cached = self.cache.get("period", code, ttl=12 * 3600)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNPeriodIncrease",
+            params={
+                "FCODE": code,
+                "deviceid": "1",
+                "plat": "Iphone",
+                "product": "EFund",
+                "version": "6.2.5",
+            },
+        )
+        out = parse_period_returns((r.json() or {}).get("Datas"))
+        self.cache.set("period", code, out)
+        return out
 
     def search_funds(self, keyword):
         """按名称关键词搜索基金（天天基金搜索建议接口）。返回 [{code,name,type}]，按相关度排序"""

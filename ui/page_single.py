@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool import FundApiError  # noqa: E402
 from ui.render import render_fund_detail_section, render_manager_funds  # noqa: E402
 from ui.state import (  # noqa: E402
+    KEY_DETAIL_PAGE,
     KEY_DETAIL_SCOPE,
     KEY_MANAGER_DUP,
     KEY_MANAGER_MATCHES,
@@ -34,6 +35,7 @@ def _pick_fund(code, name=""):
     st.session_state[KEY_SINGLE_CODE] = code
     st.session_state[KEY_SEARCH_MATCHES] = None
     st.session_state[KEY_DETAIL_SCOPE] = "page"
+    st.session_state[KEY_DETAIL_PAGE] = "single"
     record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
 
 
@@ -144,7 +146,7 @@ if _mgrs:
 _mv = st.session_state.get(KEY_MANAGER_VIEW)
 if _mv:
     st.markdown(f"### 👤 {_mv['name']}（{_mv['company']}）")
-    render_manager_funds(_mv)
+    render_manager_funds(_mv, page="single")
 
 # 一次输入多位经理：逐个匹配、每位一个分块（可折叠）展示在管基金
 _views = st.session_state.get(KEY_MANAGER_VIEWS)
@@ -161,11 +163,13 @@ if _views:
             f"👤 {_m['name']} · {_m['company']} · 现任 {len(_m['codes'])} 只 · 在管 {_m['scale']}",
             expanded=_i == 0,
         ):
-            render_manager_funds(_m)
+            render_manager_funds(_m, page="single")
 
 # ---------------- 单只基金详情（页面底部；从经理视图点开的详情就地显示在视图内） ----------------
+# 只显示本页选定的基金（scope=="page"）：分组页经理视图里点开的详情（scope=="manager"）
+# 归属分组页，不在此渲染，避免跨页遗留
 _scode = st.session_state.get(KEY_SINGLE_CODE)
-if _scode and st.session_state.get(KEY_DETAIL_SCOPE) != "manager":
+if _scode and st.session_state.get(KEY_DETAIL_SCOPE) == "page":
     render_fund_detail_section(_scode)
 
 # ---------------- 查询历史 ----------------

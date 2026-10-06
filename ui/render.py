@@ -23,6 +23,7 @@ from ui.sortable_table import render_sortable_table
 from ui.state import (
     KEY_CODE_GROUPS,
     KEY_DETAIL_MANAGER,
+    KEY_DETAIL_PAGE,
     KEY_DETAIL_SCOPE,
     KEY_DUP_CODES,
     KEY_DUP_WITHIN,
@@ -61,6 +62,14 @@ def _chg_sort_key(chg):
     return 0 if chg == "持平" else None
 
 
+def pct(value):
+    """阶段涨幅原始值 -> '-2.31%'（None/无效 -> '--'，新基金未满该期）"""
+    try:
+        return f"{float(value):.2f}%"
+    except (TypeError, ValueError):
+        return "--"
+
+
 def display_row(row):
     """原始行 -> 总览表展示行（列名即表头）。格式化集中在此，别处不得拼展示文案。"""
     scale = yi(row.get("nav_yuan"))
@@ -74,6 +83,10 @@ def display_row(row):
         "规模(净资产)": scale,
         "规模日期": row["规模日期"],
         "净值日期": row["净值日期"],
+        "近1月": pct(row.get("r1m")),
+        "近3月": pct(row.get("r3m")),
+        "近6月": pct(row.get("r6m")),
+        "近1年": pct(row.get("r1y")),
         "基金经理持有本基金": format_range(row.get("holding")) or "--",
         "持有数据来源": row.get("holding_src") or "--",
         "持有较上期": _fmt_change(row.get("holding_chg")),
@@ -81,20 +94,26 @@ def display_row(row):
 
 
 def display_sort_values(rows):
-    """原始行列表 -> sortable_table 的数值排序键（规模按元数、持有按档位、变化按升降档）"""
+    """原始行列表 -> sortable_table 的数值排序键（规模按元数、收益/持有按数值、变化按升降档）"""
     return {
         "规模(净资产)": [r.get("nav_yuan") for r in rows],
+        "近1月": [r.get("r1m") for r in rows],
+        "近3月": [r.get("r3m") for r in rows],
+        "近6月": [r.get("r6m") for r in rows],
+        "近1年": [r.get("r1y") for r in rows],
         "基金经理持有本基金": [range_rank(r.get("holding")) for r in rows],
         "持有较上期": [_chg_sort_key(r.get("holding_chg")) for r in rows],
     }
 
 
 # ---------------- 单只基金详情 ----------------
-def pick_manager_fund(mgr_id, code, name=""):
-    """从经理视图里点基金：详情就地显示在该经理视图内（而不是长页面最底部）"""
+def pick_manager_fund(mgr_id, code, name="", page=""):
+    """从经理视图里点基金：详情就地显示在该经理视图内（而不是长页面最底部）。
+    page 记录详情归属页（"groups"/"single"），避免多页共用会话时详情跨页遗留。"""
     st.session_state[KEY_SINGLE_CODE] = code
     st.session_state[KEY_DETAIL_SCOPE] = "manager"
     st.session_state[KEY_DETAIL_MANAGER] = mgr_id
+    st.session_state[KEY_DETAIL_PAGE] = page
     record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
 
 
@@ -200,8 +219,9 @@ def render_fund_detail(code, with_holding=None):
 
 
 # ---------------- 经理视图（单只/经理查询页与分组查询的经理下钻共用） ----------------
-def render_manager_funds(m):
+def render_manager_funds(m, page=""):
     """一位经理的在管基金总览（单只/经理查询页与分组查询的经理下钻共用）。
+    page（"groups"/"single"）用于就地详情的页面归属校验，其他页遗留的详情状态不渲染。
     基金按钮的 key 带经理 ID 前缀：共管基金会在多位经理块中重复出现，避免 key 冲突。"""
     _days = str(m.get("days", "--"))
     _years = f"（约 {int(_days) // 365} 年）" if _days.isdigit() else ""
@@ -221,6 +241,7 @@ def render_manager_funds(m):
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
+                       "r1m": None, "r3m": None, "r6m": None, "r1y": None,
                        "holding": "", "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
             else:
                 if row["small"]:
@@ -242,9 +263,11 @@ def render_manager_funds(m):
     for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
         with _mvcols[_i % 4]:
             st.button(f"{_name[:10]} {_code}", key=f"mvfund_{m['id']}_{_code}",
-                      on_click=pick_manager_fund, args=(m["id"], _code, _name), width="stretch")
-    # 就地详情：点本视图的基金，详情显示在本视图内（共管基金只显示在被点击的经理视图）
+                      on_click=pick_manager_fund, args=(m["id"], _code, _name, page), width="stretch")
+    # 就地详情：点本视图的基金，详情显示在本视图内（共管基金只显示在被点击的经理视图）；
+    # 页面归属须一致——分组页/单只页共用会话，否则另一页的同经理视图会渲染出遗留详情
     if (st.session_state.get(KEY_DETAIL_SCOPE) == "manager"
+            and st.session_state.get(KEY_DETAIL_PAGE) == page
             and st.session_state.get(KEY_DETAIL_MANAGER) == m["id"]
             and st.session_state.get(KEY_SINGLE_CODE)):
         render_fund_detail_section(st.session_state[KEY_SINGLE_CODE])
@@ -292,14 +315,20 @@ def _highlight_small_scale(small_codes, codes):
 
 
 def _highlight_changes(col):
-    """持有变化列（总览「持有较上期」/ 详情「较上期」）单元格着色：↑绿 ↓红"""
-    if col.name not in ("持有较上期", "较上期"):
+    """涨跌单元格着色（按列）：「持有较上期/较上期」↑绿 ↓红；
+    阶段涨幅列（近1月/近3月/近6月/近1年）正绿 负红（沿用绿=好红=差的既有高亮语义）；
+    其他列与 --（未满期/无数据）不着色"""
+    if col.name in ("持有较上期", "较上期"):
+        def bg(v):
+            return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
+    elif col.name in ("近1月", "近3月", "近6月", "近1年"):
+        def bg(v):
+            if v in ("--", ""):
+                return ""
+            return _CHG_DOWN_BG if v.startswith("-") else _CHG_UP_BG
+    else:
         return [""] * len(col)
-    out = []
-    for v in col:
-        v = str(v)
-        out.append(_CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else "")
-    return out
+    return [bg(str(v)) for v in col]
 
 
 # ---------------- 分组结果：经理汇总 + 经理下钻 + 分组整体 ----------------
@@ -383,7 +412,7 @@ def render_manager_drilldown(name, items):
     if view.get("group") == name and view.get("mgr"):
         m = view["mgr"]
         st.markdown(f"##### 👤 {m['name']}（{m.get('company')}）的全部在管基金")
-        render_manager_funds(m)
+        render_manager_funds(m, page="groups")
 
 
 def render_group(name, codes, results):

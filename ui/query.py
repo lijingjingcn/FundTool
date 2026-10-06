@@ -76,16 +76,21 @@ def fund_overview_row(code, with_holding=True):
     - 原始值（渲染层用 render.display_row 格式化）：
       nav_yuan    float|None  期末净资产（元）
       small       bool        迷你基金（净资产 < SMALL_NAV_YUAN，清盘风险）
+      r1m/r3m/r6m/r1y float|None  近1月/3月/6月/1年阶段涨幅（%）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
       holding_src str         持有数据来源（'2026-08-31中报'）或失败原因
       holding_chg str         较上期变化（'升N档'/'降N档'/'持平'），''=无对比
       mgr_chg     str         近一年经理变更（'新任'/'离任'/'新任+离任'），''=无
 
-    基本信息网络失败抛 FundApiError；持有份额/任职记录失败不致命，记入对应字段。"""
+    基本信息网络失败抛 FundApiError；阶段涨幅/持有份额/任职记录失败不致命，记入对应字段。"""
     info = get_client().basic_info(code)
     if info is None:
         return None
     nav = _nav_value(info.get("ENDNAV"))
+    try:
+        ret = get_client().period_returns(code)
+    except FundApiError:
+        ret = {}
     row = {
         "代码": code,
         "名称": info.get("SHORTNAME", "--"),
@@ -95,6 +100,10 @@ def fund_overview_row(code, with_holding=True):
         "净值日期": info.get("FSRQ", "--"),
         "nav_yuan": nav,
         "small": nav is not None and nav < SMALL_NAV_YUAN,
+        "r1m": ret.get("r1m"),
+        "r3m": ret.get("r3m"),
+        "r6m": ret.get("r6m"),
+        "r1y": ret.get("r1y"),
         "holding": "",
         "holding_src": "",
         "holding_chg": "",

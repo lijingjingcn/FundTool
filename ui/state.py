@@ -36,6 +36,9 @@ KEY_GROUP_TABS = "group_tabs"      # 分组结果 st.tabs 的选中分组（stat
 KEY_SINGLE_CODE = "single_result_code"    # 当前查看详情的基金代码
 KEY_DETAIL_SCOPE = "detail_scope"         # 详情显示位置："page"=页面底部 / "manager"=经理视图内就地显示
 KEY_DETAIL_MANAGER = "detail_manager_id"  # 就地详情所属经理视图的经理 ID
+KEY_DETAIL_PAGE = "detail_page"           # 详情是在哪一页打开的（"groups"/"single"）：
+                                          # 多页应用共用同一会话，没有页面归属时在分组页点开的详情
+                                          # 会遗留到单只/经理查询页的同经理视图里
 KEY_SEARCH_MATCHES = "search_matches"     # 名称搜索匹配到的基金列表
 KEY_MANAGER_MATCHES = "manager_matches"   # 单关键词：目录匹配到的经理列表
 KEY_MANAGER_VIEW = "manager_view"         # 单关键词：卡片点选的经理（单经理视图）

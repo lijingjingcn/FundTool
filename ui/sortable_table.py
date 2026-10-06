@@ -119,6 +119,9 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                 cls = "mgrchg"
             elif c in ("持有较上期", "较上期"):
                 cls = "up" if val.startswith("↑") else "down" if val.startswith("↓") else ""
+            elif c in ("近1月", "近3月", "近6月", "近1年"):
+                # 阶段涨幅：正绿负红（同持有变化的绿=好红=差），--（未满期/无数据）不着色
+                cls = "down" if val.startswith("-") and val != "--" else "up" if val not in ("--", "") else ""
             tds.append(f'<td class="{cls}" data-sort="{data_sort}">{_html.escape(val)}</td>')
         trs.append("<tr>" + "".join(tds) + "</tr>")
     return (

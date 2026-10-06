@@ -30,9 +30,17 @@ import pytest  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from ui.query import fund_overview_row, group_manager_agg, mgr_change_label  # noqa: E402
-from ui.render import display_row, manager_summary_rows  # noqa: E402
-from ui.state import clear_history, get_client  # noqa: E402
+from ui.render import display_row, manager_summary_rows, pct  # noqa: E402
+from ui.state import (  # noqa: E402
+    KEY_DETAIL_MANAGER,
+    KEY_DETAIL_PAGE,
+    KEY_DETAIL_SCOPE,
+    KEY_SINGLE_CODE,
+    clear_history,
+    get_client,
+)
 from ui.sortable_table import sortable_table_html  # noqa: E402
+from fundtool.client import parse_period_returns  # noqa: E402
 
 import pandas as pd  # noqa: E402
 
@@ -145,7 +153,10 @@ def test_two_groups_cross_dup_and_manager_drilldown():
     assert wh is not None, f"010790 的经理吴昊应在下钻按钮中，实际 {[b.key for b in gmgr_btns]}"
     wh.click().run()
     assert any("点击表头排序" in c.value for c in at.caption), [c.value for c in at.caption]
-    next(b for b in at.button if b.key == "mvfund_30132788_010790")  # 吴昊在管基金按钮已渲染
+    mv = next(b for b in at.button if b.key == "mvfund_30132788_010790")  # 吴昊在管基金按钮已渲染
+    # 分组页点经理视图内的基金：详情就地显示在该经理视图内（页面归属 groups）
+    mv.click().run()
+    assert any("010790" in s.value for s in at.success), [s.value for s in at.success]
 
 
 def test_groups_persist_across_sessions():
@@ -251,6 +262,27 @@ def test_multi_manager_blocks_with_inplace_detail():
     assert any("易方达蓝筹精选" in s.value for s in at.success), [s.value for s in at.success]
 
 
+def test_manager_detail_not_leaking_across_pages():
+    """多页共用会话：分组页经理视图点开的基金详情不得遗留到单只/经理查询页。
+    模拟分组页状态（scope=manager 且 page=groups）后在本页查同一位经理，
+    经理视图内与页面底部都不应出现该详情；本页重新点开则正常显示。"""
+    at = AppTest.from_file(SINGLE_PAGE, default_timeout=180)
+    at.session_state[KEY_DETAIL_SCOPE] = "manager"
+    at.session_state[KEY_DETAIL_PAGE] = "groups"
+    at.session_state[KEY_DETAIL_MANAGER] = "30189744"
+    at.session_state[KEY_SINGLE_CODE] = "005827"
+    at.run()
+    next(t for t in at.text_input if t.key == "single_q").set_value("张坤").run()
+    next(b for b in at.button if b.key == "single_go").click().run()
+    next(b for b in at.button if b.key == "mgr_30189744").click().run()
+    assert any("点击表头排序" in c.value for c in at.caption), "经理视图应已渲染"
+    assert not [s for s in at.success if "蓝筹精选" in s.value], \
+        f"分组页点开的详情不得遗留到本页，实际 {[s.value for s in at.success]}"
+    # 同一只基金在本页点开，详情正常就地出现（页面归属校验不拦本页自己的交互）
+    next(b for b in at.button if b.key == "mvfund_30189744_005827").click().run()
+    assert any("易方达蓝筹精选" in s.value for s in at.success), [s.value for s in at.success]
+
+
 def test_same_name_manager_hints():
     """同名经理提示（目录中 吴昊 6 位、李博 3 位重名），单人查询与多人查询都有提示"""
     at = _run_single("吴昊")
@@ -264,19 +296,60 @@ def test_same_name_manager_hints():
 
 
 # ---------------- 纯函数：原始行/展示行/经理聚合/排序键 ----------------
+def test_parse_period_returns():
+    """阶段涨幅解析：Y/3Y/6Y/1N -> r1m/r3m/r6m/r1y；空串（未满期）与其他期间忽略"""
+    datas = [
+        {"title": "Z", "syl": "1.23"},          # 近1周：不用
+        {"title": "Y", "syl": "-4.07"},
+        {"title": "3Y", "syl": "-4.58"},
+        {"title": "6Y", "syl": ""},              # 未满 6 月
+        {"title": "1N", "syl": "-28.73"},
+        {"title": "JN", "syl": "-21.75"},        # 今年以来：不用
+        {"title": "LN", "syl": None},            # 成立来：不用
+    ]
+    assert parse_period_returns(datas) == {"r1m": -4.07, "r3m": -4.58, "r6m": None, "r1y": -28.73}
+    assert parse_period_returns([]) == {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
+    assert parse_period_returns(None) == {"r1m": None, "r3m": None, "r6m": None, "r1y": None}
+
+
+def test_pct_format():
+    """阶段涨幅格式化：两位小数百分数，None/非数字 -> '--'（新基金未满期）"""
+    assert pct(-4.07) == "-4.07%"
+    assert pct(28) == "28.00%"
+    assert pct(None) == "--"
+    assert pct("") == "--"
+    assert pct("abc") == "--"
+
+
+def test_highlight_changes_coloring():
+    """涨跌着色：持有变化列 ↑绿↓红；阶段涨幅列 正绿负红、-- 不着色；其他列不着色"""
+    from ui.render import _CHG_DOWN_BG, _CHG_UP_BG, _highlight_changes
+    ret = _highlight_changes(pd.Series(["-4.07%", "1.50%", "--"], name="近1月"))
+    assert ret == [_CHG_DOWN_BG, _CHG_UP_BG, ""], ret
+    chg = _highlight_changes(pd.Series(["↑2档", "↓1档", "→持平"], name="持有较上期"))
+    assert chg == [_CHG_UP_BG, _CHG_DOWN_BG, ""], chg
+    assert _highlight_changes(pd.Series(["1.50%", "--"], name="近3月")) == [_CHG_UP_BG, ""]
+    assert _highlight_changes(pd.Series(["x", "y"], name="名称")) == ["", ""]
+
+
 def test_fund_overview_row_raw_and_display():
     """原始行保留数值/枚举字段，display_row 负责全部展示格式化"""
     raw = fund_overview_row("005827", with_holding=True)
     assert raw["holding"] == ">100", raw
     assert raw["nav_yuan"] and raw["nav_yuan"] > 1e9, raw["nav_yuan"]
     assert raw["small"] is False
+    assert isinstance(raw["r1y"], float), raw  # 老基金四期阶段涨幅都应拿到数值
+    assert all(isinstance(raw[k], float) for k in ("r1m", "r3m", "r6m")), raw
     disp = display_row(raw)
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
+    assert disp["近1年"] == pct(raw["r1y"]) and disp["近1年"].endswith("%"), disp
     small_raw = dict(raw, small=True, nav_yuan=0.3e8, holding="0", holding_chg="降2档")
     d2 = display_row(small_raw)
     assert d2["规模(净资产)"].endswith("⚠️") and d2["基金经理持有本基金"] == "0（未持有）"
     assert d2["持有较上期"] == "↓2档"
+    d3 = display_row(dict(raw, r1m=None, r3m=None, r6m=None, r1y=None))
+    assert d3["近1月"] == "--" and d3["近1年"] == "--", d3  # 未满期/获取失败兜底
 
 
 def test_mgr_change_label_window():
@@ -322,7 +395,8 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     raw = fund_overview_row("005827", with_holding=True)
     fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
                 "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
-                "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任"}
+                "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
+                "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
     from ui.render import display_sort_values
     df = pd.DataFrame([display_row(raw), display_row(fake_raw)])
     h = sortable_table_html(df, small_codes={"999999"}, mgr_change_codes={"005827"},
@@ -330,6 +404,10 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert f'data-sort="{raw["nav_yuan"]}"' in h, "规模排序键应来自原始 nav_yuan（全精度数值）"
     assert f'data-sort="{0.3e8}"' in h, "迷你基金规模键应为 0.3e8"
     assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
+    assert 'data-sort="-28.73"' in h and 'data-sort="1.5"' in h, "阶段涨幅列应为数值排序键"
+    assert '<td class="down" data-sort="-28.73"' in h, "负收益应红底"
+    assert '<td class="up" data-sort="1.5"' in h, "正收益应绿底"
+    assert '<td class="" data-sort=""' in h, "未满期（--）不着色且排序沉底"
     assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"
     assert 'td class="mgrchg"' in h, "经理变更的基金经理单元格应标琥珀色"
