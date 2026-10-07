@@ -15,6 +15,8 @@ import re as _re
 import pandas as pd
 import streamlit as st
 
+from ui.constants import TWO_LINE_HEADERS
+
 # 高亮底色（与总览表一致的半透明色，浅/深色主题都可读）
 _SMALL_BG = "rgba(229,57,53,0.45)"
 _UP_BG = "rgba(46,160,67,0.40)"
@@ -108,11 +110,16 @@ _GROUPED_COL = _re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
 def _leaf_th(col, idx, label=None, rowspan=False):
     """可排序的叶子表头：label 缺省用完整列名；分组列只显示子项标签。
     data-col 始终存完整列名（CSV 导出表头与平铺列名一致）；data-idx 是 body 单元格列号，
-    两行表头下叶子 th 在自己行内的位置不再等于列号，排序必须用显式索引。"""
-    lab = label if label is not None else str(col)
+    两行表头下叶子 th 在自己行内的位置不再等于列号，排序必须用显式索引。
+    超长表头（TWO_LINE_HEADERS）在 <br> 处折成两行。"""
+    if label is None and str(col) in TWO_LINE_HEADERS:
+        a, b = TWO_LINE_HEADERS[str(col)]
+        lab_html = f"{_html.escape(a)}<br>{_html.escape(b)}"
+    else:
+        lab_html = _html.escape(label if label is not None else str(col))
     span = ' rowspan="2"' if rowspan else ""
     return (f'<th{span} data-col="{_html.escape(str(col))}" data-idx="{idx}" aria-sort="none" '
-            f'onclick="sortTable(this)">{_html.escape(lab)}<span class="arr">↕</span></th>')
+            f'onclick="sortTable(this)">{lab_html}<span class="arr">↕</span></th>')
 
 
 def _grouped_thead_html(cols):

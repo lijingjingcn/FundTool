@@ -46,6 +46,7 @@ from ui.state import (  # noqa: E402
     get_client,
 )
 from ui.sortable_table import sortable_table_html  # noqa: E402
+from ui.constants import TWO_LINE_HEADERS  # noqa: E402
 from fundtool.client import parse_jdzf_ranks, parse_period_returns  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -91,8 +92,9 @@ def overview_dfs(at):
             v = v.data
         if hasattr(v, "columns"):
             if isinstance(v.columns, pd.MultiIndex):
+                rev = {pair: flat for flat, pair in TWO_LINE_HEADERS.items()}
                 v = v.copy()
-                v.columns = [f"{a}({b})" if a else str(b) for a, b in v.columns]
+                v.columns = [rev.get((a, b), f"{a}({b})" if a else str(b)) for a, b in v.columns]
             if "代码" in v.columns:
                 out.append(v)
     return out
@@ -422,7 +424,7 @@ def test_parse_jdzf_ranks():
 def test_peer_rank_column_display_and_coloring():
     """同类排名(近1年/近3年)：'前X%'格式（向上取整、最小1）、数值排序键、
     前25%红字/后25%绿字（Styler 与 HTML 表两套渲染路径语义一致）"""
-    from ui.render import _RET_DOWN_FG, _RET_UP_FG, _highlight_changes, display_sort_values
+    from ui.render import _RET_DOWN_FG, _RET_UP_FG, _highlight_changes, _styler_col_name, display_sort_values
 
     base = {"代码": "A", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "r1m": None, "r3m": None,
@@ -452,6 +454,8 @@ def test_peer_rank_column_display_and_coloring():
     assert ("同类排名", "近1年") in gdf.columns and ("", "代码") in gdf.columns, list(gdf.columns)
     assert ("同类排名", "近5年") in gdf.columns, "三列排名都应归入同类排名组"
     assert ("", "规模(净资产)") in gdf.columns, "单独的「规模(净资产)」不得被拆成两行"
+    assert ("基金经理", "持有本基金") in gdf.columns, "超长表头应拆成两行（TWO_LINE_HEADERS）"
+    assert _styler_col_name(gdf[("基金经理", "持有本基金")]) == "基金经理持有本基金", "归一列名应还原平铺名"
     assert _highlight_changes(gdf[("同类排名", "近1年")]) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""], \
         "完整元组列名选中（Styler.apply 实际传入的形式）才能命中归一逻辑"
     # 经理视图（HTML 排序表）路径：数值排序键 + 同样的颜色语义
@@ -587,6 +591,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert '<th rowspan="2" data-col="代码"' in h and '<th rowspan="2" data-col="规模(净资产)"' in h, h
     assert 'data-col="同类排名(近1年)"' in h and 'data-col="同类排名(近5年)"' in h, \
         "data-col 保留完整列名，CSV 导出表头不变"
+    assert "基金经理<br>持有本基金<span class=\"arr\">" in h, "超长表头应折成两行显示"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
     assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
         "行悬停底色不得覆盖红/绿/琥珀高亮单元格"

@@ -18,7 +18,7 @@ from fundtool import (
     get_manager_holding_history,
     range_rank,
 )
-from ui.constants import HISTORY_N, SMALL_NAV_YUAN
+from ui.constants import HISTORY_N, SMALL_NAV_YUAN, TWO_LINE_HEADERS
 from ui.query import (
     fund_overview_row,
     group_manager_agg,
@@ -310,7 +310,8 @@ _GROUPED_COL = re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
 
 def grouped_header_df(df):
     """平铺列名的展示表 -> 两行表头（MultiIndex）：相邻≥2列同名「组(子项)」时，
-    第一行为组名（跨列合并）、第二行为子项；其余列第一行为空。CSV 导出仍用平铺 df。"""
+    第一行为组名（跨列合并）、第二行为子项；其余列第一行为空。
+    TWO_LINE_HEADERS 里的超长列名也拆成上行/下行两行。CSV 导出仍用平铺 df。"""
     cols = list(df.columns)
     tops = [""] * len(cols)
     i = 0
@@ -326,11 +327,18 @@ def grouped_header_df(df):
                 i = j
                 continue
         i += 1
+    subs = []
+    for c, t in zip(cols, tops):
+        if t:
+            subs.append(_GROUPED_COL.match(str(c)).group("sub"))
+        elif str(c) in TWO_LINE_HEADERS:
+            subs.append(TWO_LINE_HEADERS[str(c)][1])
+        else:
+            subs.append(str(c))
+    tops = [TWO_LINE_HEADERS[str(c)][0] if not t and str(c) in TWO_LINE_HEADERS else t
+            for c, t in zip(cols, tops)]
     out = df.copy()
-    out.columns = pd.MultiIndex.from_arrays(
-        [tops, [_GROUPED_COL.match(str(c)).group("sub") if t else str(c)
-                for c, t in zip(cols, tops)]]
-    )
+    out.columns = pd.MultiIndex.from_arrays([tops, subs])
     return out
 
 
@@ -339,6 +347,9 @@ def _styler_col_name(col):
     ('','代码') -> '代码'；普通单级列名原样返回。让高亮函数对两套表头通用。"""
     n = col.name
     if isinstance(n, tuple) and len(n) == 2:
+        for flat, (a, b) in TWO_LINE_HEADERS.items():
+            if n == (a, b):
+                return flat
         top, sub = (str(x) for x in n)
         return f"{top}({sub})" if top else sub
     return str(n)
