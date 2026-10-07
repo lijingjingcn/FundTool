@@ -35,7 +35,7 @@ from ui.query import (  # noqa: E402
     group_manager_agg,
     mgr_change_label,
 )
-from ui.render import display_row, manager_summary_rows, pct  # noqa: E402
+from ui.render import display_row, manager_summary_rows, peer_pct, pct  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_MANAGER,
     KEY_DETAIL_PAGE,
@@ -46,7 +46,7 @@ from ui.state import (  # noqa: E402
     get_client,
 )
 from ui.sortable_table import sortable_table_html  # noqa: E402
-from fundtool.client import parse_period_returns  # noqa: E402
+from fundtool.client import parse_jdzf_ranks, parse_period_returns  # noqa: E402
 
 import pandas as pd  # noqa: E402
 
@@ -81,15 +81,20 @@ def overview_dfs(at):
     """只取分组总览表（以“代码”列为特征），排除详情里的任职表等。
 
     总览表用 st.table 渲染（文字可复制）；带高亮时传入 pandas Styler，
-    AppTest 取到的 .value 已是底层 DataFrame。
+    AppTest 取到的 .value 已是底层 DataFrame。两行表头的 MultiIndex 列名
+    在这里展平回 '同类排名(近1年)' 形式，方便下游断言按平铺列名访问。
     """
     out = []
     for d in list(at.dataframe) + list(at.table):
         v = d.value
         if hasattr(v, "data"):  # pandas Styler
             v = v.data
-        if hasattr(v, "columns") and "代码" in v.columns:
-            out.append(v)
+        if hasattr(v, "columns"):
+            if isinstance(v.columns, pd.MultiIndex):
+                v = v.copy()
+                v.columns = [f"{a}({b})" if a else str(b) for a, b in v.columns]
+            if "代码" in v.columns:
+                out.append(v)
     return out
 
 
@@ -223,8 +228,9 @@ def test_requery_clears_previous_results_before_query(monkeypatch):
 
     fake_row = {"代码": "005827", "名称": "易方达蓝筹精选混合", "类型": "混合型", "基金经理": "张坤",
                 "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
-                "r1m": None, "r3m": None, "r6m": None, "r1y": None, "rytd": None,
-                "r3y": None, "r5y": None, "holding": "", "holding_src": "--",
+                "r1m": None, "r3m": None, "r6m": None, "r1y": None, "r2y": None,
+                "rytd": None, "r3y": None, "r5y": None, "r1y_peer_pct": None,
+                "r3y_peer_pct": None, "r5y_peer_pct": None, "holding": "", "holding_src": "--",
                 "holding_chg": "", "mgr_chg": ""}
     captured = []  # 每次查询入口时刻的 (会话旧结果, 代码列表)
 
@@ -360,7 +366,7 @@ def test_same_name_manager_hints():
 
 # ---------------- 纯函数：原始行/展示行/经理聚合/排序键 ----------------
 def test_parse_period_returns():
-    """阶段涨幅解析：Y/3Y/6Y/1N/JN/3N/5N -> r1m/r3m/r6m/r1y/rytd/r3y/r5y；空串（未满期）忽略"""
+    """阶段涨幅解析：Y/3Y/6Y/1N/2N/JN/3N/5N -> r1m/r3m/r6m/r1y/r2y/rytd/r3y/r5y；空串（未满期）忽略"""
     datas = [
         {"title": "Z", "syl": "1.23"},          # 近1周：不用
         {"title": "Y", "syl": "-4.07"},
@@ -370,17 +376,91 @@ def test_parse_period_returns():
         {"title": "JN", "syl": "-21.75"},
         {"title": "3N", "syl": "-25.78"},
         {"title": "5N", "syl": ""},              # 未满 5 年
-        {"title": "2N", "syl": "-24.58"},        # 近2年：不用
+        {"title": "2N", "syl": "-24.58"},
         {"title": "LN", "syl": None},            # 成立来：不用
     ]
     assert parse_period_returns(datas) == {
         "r1m": -4.07, "r3m": -4.58, "r6m": None, "r1y": -28.73,
-        "rytd": -21.75, "r3y": -25.78, "r5y": None,
+        "r2y": -24.58, "rytd": -21.75, "r3y": -25.78, "r5y": None,
     }
     empty = {"r1m": None, "r3m": None, "r6m": None, "r1y": None,
-             "rytd": None, "r3y": None, "r5y": None}
+             "r2y": None, "rytd": None, "r3y": None, "r5y": None}
     assert parse_period_returns([]) == empty
     assert parse_period_returns(None) == empty
+
+
+def test_parse_jdzf_ranks():
+    """F10 阶段涨幅页解析：各期 '排名|总数' -> 百分位（0=最好 100=最差）；
+    近1周/成立来不取，未满期/无排名记 None。样例取自 005827 真实返回的裁剪。"""
+    sample = (
+        "var apidata={ content:\"<div class='jdzfnew'>"
+        "<ul class='fcol'><li class='title'></li><li>涨幅</li><li>同类平均</li><li>同类排名</li></ul>"
+        "<ul><li class='title'>今年来</li><li class='tor grn bold'>-21.75%</li>"
+        "<li class='tor red bold'>2.35%</li><li class='tlpm'>4682<font class='gray'>|</font>4994</li></ul>"
+        "<ul><li class='title'>近1周</li><li class='tlpm'>1796<font class='gray'>|</font>5449</li></ul>"
+        "<ul><li class='title'>近1月</li><li class='tlpm'>1868<font class='gray'>|</font>5536</li></ul>"
+        "<ul><li class='title'>近3月</li><li class='tlpm'>1751<font class='gray'>|</font>5417</li></ul>"
+        "<ul><li class='title'>近6月</li><li class='tlpm'>4893<font class='gray'>|</font>5186</li></ul>"
+        "<ul><li class='title'>近1年</li><li class='tor grn bold'>-28.73%</li>"
+        "<li class='tor red bold'>0.77%</li><li class='tlpm'>4573<font class='gray'>|</font>4787</li></ul>"
+        "<ul><li class='title'>近2年</li><li class='tlpm'>4168<font class='gray'>|</font>4244</li></ul>"
+        "<ul><li class='title'>近3年</li><li class='tlpm'>3576<font class='gray'>|</font>3701</li></ul>"
+        "<ul><li class='title'>近5年</li><li class='tlpm'>2037<font class='gray'>|</font>2216</li></ul>"
+        "<ul><li class='title'>近3月空缺</li><li class='tlpm'>---</li></ul>"
+        "<ul class='last'><li class='title'>成立来</li><li class='tor red bold'>45.73%</li>"
+        "<li class='tlpm'>---</li></ul>"
+        "\"};"
+    )
+    assert parse_jdzf_ranks(sample) == {
+        "rytd": 93.75, "r1m": 33.74, "r3m": 32.32, "r6m": 94.35,
+        "r1y": 95.53, "r2y": 98.21, "r3y": 96.62, "r5y": 91.92,
+    }
+    assert parse_jdzf_ranks("var apidata=") == dict.fromkeys(
+        ("r1m", "r3m", "r6m", "rytd", "r1y", "r2y", "r3y", "r5y"))
+
+
+def test_peer_rank_column_display_and_coloring():
+    """同类排名(近1年/近3年)：'前X%'格式（向上取整、最小1）、数值排序键、
+    前25%红字/后25%绿字（Styler 与 HTML 表两套渲染路径语义一致）"""
+    from ui.render import _RET_DOWN_FG, _RET_UP_FG, _highlight_changes, display_sort_values
+
+    base = {"代码": "A", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
+            "净值日期": "--", "nav_yuan": None, "small": False, "r1m": None, "r3m": None,
+            "r6m": None, "r1y": None, "r2y": None, "rytd": None, "r3y": None, "r5y": None,
+            "holding": "", "holding_src": "--", "holding_chg": "", "mgr_chg": ""}
+    rows = [dict(base, 代码="A", r1y_peer_pct=0.25, r3y_peer_pct=12.0, r5y_peer_pct=50.0),  # 不足1%按 前1%
+            dict(base, 代码="B", r1y_peer_pct=12.0, r3y_peer_pct=50.0, r5y_peer_pct=None),
+            dict(base, 代码="C", r1y_peer_pct=50.0, r3y_peer_pct=None, r5y_peer_pct=99.9),
+            dict(base, 代码="D", r1y_peer_pct=95.53, r3y_peer_pct=99.9, r5y_peer_pct=1.0),
+            dict(base, 代码="E", r1y_peer_pct=None)]                      # 未满 1 年 -> --
+    disp = [display_row(r) for r in rows]
+    assert [d["同类排名(近1年)"] for d in disp] == ["前1%", "前12%", "前50%", "前96%", "--"]
+    assert [d["同类排名(近3年)"] for d in disp] == ["前12%", "前50%", "--", "前100%", "--"]
+    assert [d["同类排名(近5年)"] for d in disp] == ["前50%", "--", "前100%", "前1%", "--"]
+    # 分组总览表（pandas Styler）路径
+    for cname in ("同类排名(近1年)", "同类排名(近3年)", "同类排名(近5年)"):
+        col = pd.Series([d[cname] for d in disp], name=cname)
+        if cname == "同类排名(近1年)":
+            assert _highlight_changes(col) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""]
+        elif cname == "同类排名(近3年)":
+            assert _highlight_changes(col) == [_RET_UP_FG, "", "", _RET_DOWN_FG, ""]
+        else:
+            assert _highlight_changes(col) == ["", "", _RET_DOWN_FG, _RET_UP_FG, ""]
+    # 分组总览表的 MultiIndex 两行表头：组名跨列、其余列顶层为空，高亮函数按归一列名工作
+    from ui.render import grouped_header_df
+    gdf = grouped_header_df(pd.DataFrame(disp))
+    assert ("同类排名", "近1年") in gdf.columns and ("", "代码") in gdf.columns, list(gdf.columns)
+    assert ("同类排名", "近5年") in gdf.columns, "三列排名都应归入同类排名组"
+    assert ("", "规模(净资产)") in gdf.columns, "单独的「规模(净资产)」不得被拆成两行"
+    assert _highlight_changes(gdf[("同类排名", "近1年")]) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""], \
+        "完整元组列名选中（Styler.apply 实际传入的形式）才能命中归一逻辑"
+    # 经理视图（HTML 排序表）路径：数值排序键 + 同样的颜色语义
+    h = sortable_table_html(pd.DataFrame(disp), sort_values=display_sort_values(rows))
+    assert '<td class="ret-up" data-sort="12.0"' in h, h
+    assert '<td class="ret-down" data-sort="95.53"' in h, h
+    assert '<td class="" data-sort="50.0"' in h, h
+    assert '<td class="ret-up" data-sort="12.0"' in h and 'data-sort="99.9"' in h, h
+    assert '<td class="" data-sort=""' in h, "未满期不着色且排序沉底"
 
 
 def test_pct_format():
@@ -411,19 +491,28 @@ def test_fund_overview_row_raw_and_display():
     assert raw["nav_yuan"] and raw["nav_yuan"] > 1e9, raw["nav_yuan"]
     assert raw["small"] is False
     assert isinstance(raw["r1y"], float), raw  # 老基金各期阶段涨幅都应拿到数值
-    assert all(isinstance(raw[k], float) for k in ("r1m", "r3m", "r6m", "rytd", "r3y", "r5y")), raw
+    assert all(isinstance(raw[k], float) for k in ("r1m", "r3m", "r6m", "r2y", "rytd", "r3y", "r5y")), raw
+    assert isinstance(raw["r1y_peer_pct"], float), raw  # 近1年同类排名百分位
+    assert isinstance(raw["r3y_peer_pct"], float), raw  # 近3年同类排名百分位
+    assert isinstance(raw["r5y_peer_pct"], float), raw  # 近5年同类排名百分位
     disp = display_row(raw)
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
     assert disp["近1年"] == pct(raw["r1y"]) and disp["近1年"].endswith("%"), disp
+    assert disp["近2年"] == pct(raw["r2y"]), disp
     assert disp["今年以来"] == pct(raw["rytd"]) and disp["近5年"] == pct(raw["r5y"]), disp
+    assert disp["同类排名(近1年)"] == peer_pct(raw["r1y_peer_pct"]), disp
+    assert disp["同类排名(近3年)"] == peer_pct(raw["r3y_peer_pct"]), disp
+    assert disp["同类排名(近5年)"] == peer_pct(raw["r5y_peer_pct"]), disp
     small_raw = dict(raw, small=True, nav_yuan=0.3e8, holding="0", holding_chg="降2档")
     d2 = display_row(small_raw)
     assert d2["规模(净资产)"].endswith("⚠️") and d2["基金经理持有本基金"] == "0（未持有）"
     assert d2["持有较上期"] == "↓2档"
-    _none7 = {k: None for k in ("r1m", "r3m", "r6m", "r1y", "rytd", "r3y", "r5y")}
-    d3 = display_row(dict(raw, **_none7))
-    assert d3["近1月"] == "--" and d3["近5年"] == "--", d3  # 未满期/获取失败兜底
+    _none8 = {k: None for k in ("r1m", "r3m", "r6m", "r1y", "r2y", "rytd", "r3y", "r5y",
+                                 "r1y_peer_pct", "r3y_peer_pct", "r5y_peer_pct")}
+    d3 = display_row(dict(raw, **_none8))
+    assert d3["近1月"] == "--" and d3["近2年"] == "--" and d3["近5年"] == "--", d3  # 未满期/获取失败兜底
+    assert d3["同类排名(近1年)"] == "--" and d3["同类排名(近3年)"] == "--" and d3["同类排名(近5年)"] == "--", d3
 
 
 def test_mgr_change_label_window():
@@ -491,7 +580,13 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
     assert 'td class="small"' in h, "迷你基金规模单元格应标红"
     assert 'td class="mgrchg"' in h, "经理变更的基金经理单元格应标琥珀色"
-    assert h.count("<tr>") == 3, "表头行 + 2 数据行"
+    assert h.count("<tr>") == 4, "两行表头（同类排名分组）+ 2 数据行"
+    # 两行分组表头：组名合并跨列、子项在第二行、其余列贯穿；排序/导出只用叶子列
+    assert '<th class="grp" colspan="3">同类排名</th>' in h, h
+    assert 'onclick="sortTable(this)">近1年<span class="arr">' in h, "分组列叶子表头只显示子项"
+    assert '<th rowspan="2" data-col="代码"' in h and '<th rowspan="2" data-col="规模(净资产)"' in h, h
+    assert 'data-col="同类排名(近1年)"' in h and 'data-col="同类排名(近5年)"' in h, \
+        "data-col 保留完整列名，CSV 导出表头不变"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
     assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
         "行悬停底色不得覆盖红/绿/琥珀高亮单元格"

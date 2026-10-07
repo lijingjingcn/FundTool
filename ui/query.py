@@ -76,13 +76,14 @@ def fund_overview_row(code, with_holding=True):
     - 原始值（渲染层用 render.display_row 格式化）：
       nav_yuan    float|None  期末净资产（元）
       small       bool        迷你基金（净资产 < SMALL_NAV_YUAN，清盘风险）
-      r1m/r3m/r6m/r1y/rytd/r3y/r5y float|None  近1月/3月/6月/1年/今年以来/近3年/近5年阶段涨幅（%）
+      r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
+      r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
       holding_src str         持有数据来源（'2026-08-31中报'）或失败原因
       holding_chg str         较上期变化（'升N档'/'降N档'/'持平'），''=无对比
       mgr_chg     str         近一年经理变更（'新任'/'离任'/'新任+离任'），''=无
 
-    基本信息网络失败抛 FundApiError；阶段涨幅/持有份额/任职记录失败不致命，记入对应字段。"""
+    基本信息网络失败抛 FundApiError；阶段涨幅/同类排名/持有份额/任职记录失败不致命，记入对应字段。"""
     info = get_client().basic_info(code)
     if info is None:
         return None
@@ -91,6 +92,10 @@ def fund_overview_row(code, with_holding=True):
         ret = get_client().period_returns(code)
     except FundApiError:
         ret = {}
+    try:  # 同类排名（F10 阶段涨幅页）失败不致命
+        pr = get_client().peer_rank(code)
+    except FundApiError:
+        pr = {}
     row = {
         "代码": code,
         "名称": info.get("SHORTNAME", "--"),
@@ -104,9 +109,14 @@ def fund_overview_row(code, with_holding=True):
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),
         "r1y": ret.get("r1y"),
+        "r2y": ret.get("r2y"),
         "rytd": ret.get("rytd"),
         "r3y": ret.get("r3y"),
         "r5y": ret.get("r5y"),
+        # 近1年/近3年/近5年同类排名百分位（0=最好 100=最差），未满该期为 None
+        "r1y_peer_pct": pr.get("r1y"),
+        "r3y_peer_pct": pr.get("r3y"),
+        "r5y_peer_pct": pr.get("r5y"),
         "holding": "",
         "holding_src": "",
         "holding_chg": "",

@@ -45,15 +45,15 @@ def _search_rel_rank(name, kw):
     return 5
 
 
-# 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N/3N/5N=近1/3/5年（年=nian），
-# JN=今年以来
-_PERIOD_KEYS = {"Y": "r1m", "3Y": "r3m", "6Y": "r6m", "1N": "r1y", "JN": "rytd", "3N": "r3y", "5N": "r5y"}
+# 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N/2N/3N/5N=近1/2/3/5年（年=nian），
+# JN=今年以来（Z=近1周、LN=成立来不用）
+_PERIOD_KEYS = {"Y": "r1m", "3Y": "r3m", "6Y": "r6m", "1N": "r1y", "2N": "r2y", "JN": "rytd", "3N": "r3y", "5N": "r5y"}
 
 _PERIOD_FIELDS = tuple(_PERIOD_KEYS.values())
 
 
 def parse_period_returns(datas):
-    """阶段涨幅接口的 Datas 列表 -> {近1月r1m/近3月r3m/近6月r6m/近1年r1y/今年rytd/近3年r3y/近5年r5y: float|None}（单位 %）。
+    """阶段涨幅接口的 Datas 列表 -> {近1月r1m/近3月r3m/近6月r6m/今年rytd/近1年r1y/近2年r2y/近3年r3y/近5年r5y: float|None}（单位 %）。
     纯函数，便于离线测试。syl 为空串（新基金未满该期）或非数字时记 None。"""
     out = dict.fromkeys(_PERIOD_FIELDS)
     for it in datas or []:
@@ -65,6 +65,30 @@ def parse_period_returns(datas):
             out[key] = float(v)
         except (TypeError, ValueError):
             pass
+    return out
+
+
+# F10 阶段涨幅页（jdzf）的周期标题 -> 字段（「今年来」与移动端的「今年以来」同义；近1周/成立来不用）
+_JDZF_TITLES = {"近1月": "r1m", "近3月": "r3m", "近6月": "r6m", "今年来": "rytd",
+                "近1年": "r1y", "近2年": "r2y", "近3年": "r3y", "近5年": "r5y"}
+
+
+def parse_jdzf_ranks(text):
+    """F10 阶段涨幅页 HTML -> {各期: 同类排名百分位 float|None}（0=最好，100=最差）。
+    同类排名单元格形如 <li class='tlpm'>4573<font class='gray'>|</font>4787</li>
+    （第 1 名=最好；同类口径为天天基金二级分类，如混合型-偏股）。
+    未满该期或成立来（'---'）无此结构，记 None。纯函数，便于离线测试。"""
+    out = dict.fromkeys(_JDZF_TITLES.values())
+    for block in text.split("<ul")[1:]:
+        tm = re.search(r"<li class='title'>([^<]+)</li>", block)
+        key = _JDZF_TITLES.get(tm.group(1)) if tm else None
+        if not key:
+            continue
+        rm = re.search(r"tlpm'>(\d+)<font class='gray'>\|</font>(\d+)<", block)
+        if rm:
+            rank, total = int(rm.group(1)), int(rm.group(2))
+            if 0 < rank <= total:
+                out[key] = round(rank / total * 100, 2)
     return out
 
 
@@ -130,10 +154,10 @@ class EastFundClient:
         return datas
 
     def period_returns(self, code):
-        """阶段涨幅（%）：近1月/近3月/近6月/近1年/今年以来/近3年/近5年
-        （r1m/r3m/r6m/r1y/rytd/r3y/r5y），各期 float|None（新基金未满该期为 None）。
-        与基本信息同样缓存 12 小时。"""
-        cached = self.cache.get("period_v2", code, ttl=12 * 3600)
+        """阶段涨幅（%）：近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年
+        （r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y），各期 float|None（新基金未满该期为 None）。
+        与基本信息同样缓存 12 小时。缓存 v3：v2 及更早的旧缓存缺 r2y，升键强制重取。"""
+        cached = self.cache.get("period_v3", code, ttl=12 * 3600)
         if cached is not None:
             return cached
         r = self._get(
@@ -147,7 +171,22 @@ class EastFundClient:
             },
         )
         out = parse_period_returns((r.json() or {}).get("Datas"))
-        self.cache.set("period_v2", code, out)
+        self.cache.set("period_v3", code, out)
+        return out
+
+    def peer_rank(self, code):
+        """各期同类排名百分位（F10 阶段涨幅页）：{r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y: float|None}，
+        0=最好 100=最差（如 4573/4787 名 -> 95.53）。同类口径为天天基金二级分类，每日更新；
+        缓存 12 小时（与阶段涨幅一致）。"""
+        cached = self.cache.get("peerrank_v1", code, ttl=12 * 3600)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundf10.eastmoney.com/FundArchivesDatas.aspx",
+            params={"type": "jdzf", "code": code},
+        )
+        out = parse_jdzf_ranks(r.text)
+        self.cache.set("peerrank_v1", code, out)
         return out
 
     def search_funds(self, keyword):

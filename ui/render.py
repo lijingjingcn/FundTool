@@ -5,6 +5,7 @@
 总览表行（'204.16亿 ⚠️'、'>100万份'、'↑2档'），sortable_table 的数值排序键
 （sort_values）也在这里从原始字段算出——组件本身不再从展示文本里反向提取数字。
 """
+import math
 import re
 
 import pandas as pd
@@ -76,6 +77,14 @@ def pct(value):
         return "--"
 
 
+def peer_pct(value):
+    """同类排名百分位原始值 -> '前96%'（向上取整、最小 1；None -> '--'，新基金未满 1 年）"""
+    try:
+        return f"前{max(1, math.ceil(float(value)))}%"
+    except (TypeError, ValueError):
+        return "--"
+
+
 def display_row(row):
     """原始行 -> 总览表展示行（列名即表头）。格式化集中在此，别处不得拼展示文案。"""
     scale = yi(row.get("nav_yuan"))
@@ -92,10 +101,14 @@ def display_row(row):
         "近1月": pct(row.get("r1m")),
         "近3月": pct(row.get("r3m")),
         "近6月": pct(row.get("r6m")),
-        "近1年": pct(row.get("r1y")),
         "今年以来": pct(row.get("rytd")),
+        "近1年": pct(row.get("r1y")),
+        "近2年": pct(row.get("r2y")),
         "近3年": pct(row.get("r3y")),
         "近5年": pct(row.get("r5y")),
+        "同类排名(近1年)": peer_pct(row.get("r1y_peer_pct")),
+        "同类排名(近3年)": peer_pct(row.get("r3y_peer_pct")),
+        "同类排名(近5年)": peer_pct(row.get("r5y_peer_pct")),
         "基金经理持有本基金": format_range(row.get("holding")) or "--",
         "持有数据来源": row.get("holding_src") or "--",
         "持有较上期": _fmt_change(row.get("holding_chg")),
@@ -109,10 +122,14 @@ def display_sort_values(rows):
         "近1月": [r.get("r1m") for r in rows],
         "近3月": [r.get("r3m") for r in rows],
         "近6月": [r.get("r6m") for r in rows],
-        "近1年": [r.get("r1y") for r in rows],
         "今年以来": [r.get("rytd") for r in rows],
+        "近1年": [r.get("r1y") for r in rows],
+        "近2年": [r.get("r2y") for r in rows],
         "近3年": [r.get("r3y") for r in rows],
         "近5年": [r.get("r5y") for r in rows],
+        "同类排名(近1年)": [r.get("r1y_peer_pct") for r in rows],
+        "同类排名(近3年)": [r.get("r3y_peer_pct") for r in rows],
+        "同类排名(近5年)": [r.get("r5y_peer_pct") for r in rows],
         "基金经理持有本基金": [range_rank(r.get("holding")) for r in rows],
         "持有较上期": [_chg_sort_key(r.get("holding_chg")) for r in rows],
     }
@@ -254,7 +271,8 @@ def render_manager_funds(m, page=""):
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
-                       "rytd": None, "r3y": None, "r5y": None,
+                       "r2y": None, "rytd": None, "r3y": None, "r5y": None,
+                       "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
                        "holding": "", "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
             else:
                 if row["small"]:
@@ -286,6 +304,46 @@ def render_manager_funds(m, page=""):
         render_fund_detail_section(st.session_state[KEY_SINGLE_CODE])
 
 
+# 「组名(子项)」列名（如 同类排名(近1年)）；连续≥2列同组才合并，单独的「规模(净资产)」不算
+_GROUPED_COL = re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
+
+
+def grouped_header_df(df):
+    """平铺列名的展示表 -> 两行表头（MultiIndex）：相邻≥2列同名「组(子项)」时，
+    第一行为组名（跨列合并）、第二行为子项；其余列第一行为空。CSV 导出仍用平铺 df。"""
+    cols = list(df.columns)
+    tops = [""] * len(cols)
+    i = 0
+    while i < len(cols):
+        m = _GROUPED_COL.match(str(cols[i]))
+        if m:
+            j = i
+            while j < len(cols) and (mj := _GROUPED_COL.match(str(cols[j]))) and mj.group("grp") == m.group("grp"):
+                j += 1
+            if j - i >= 2:
+                for k in range(i, j):
+                    tops[k] = m.group("grp")
+                i = j
+                continue
+        i += 1
+    out = df.copy()
+    out.columns = pd.MultiIndex.from_arrays(
+        [tops, [_GROUPED_COL.match(str(c)).group("sub") if t else str(c)
+                for c, t in zip(cols, tops)]]
+    )
+    return out
+
+
+def _styler_col_name(col):
+    """Styler 列名归一：MultiIndex ('同类排名','近1年') -> '同类排名(近1年)'、
+    ('','代码') -> '代码'；普通单级列名原样返回。让高亮函数对两套表头通用。"""
+    n = col.name
+    if isinstance(n, tuple) and len(n) == 2:
+        top, sub = (str(x) for x in n)
+        return f"{top}({sub})" if top else sub
+    return str(n)
+
+
 # ---------------- 总览表高亮 ----------------
 # 跨分组重复行的底色（半透明琥珀色，深浅主题下都可读）
 _DUP_BG = "background-color: rgba(255,170,0,0.32)"
@@ -294,7 +352,7 @@ _SMALL_BG = "background-color: rgba(229,57,53,0.45)"
 # 经理持有份额变化：升档绿色 / 降档红色（单元格底色）
 _CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
 _CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
-# 阶段涨幅（近1月/3月/6月/1年/今年/3年/5年）：正收益红字 / 负收益绿字
+# 阶段涨幅（近1月/3月/6月/今年/1年/2年/3年/5年）：正收益红字 / 负收益绿字
 # （A 股习惯红涨绿跌；注意与持有较上期的绿=增持红=减持是两套语义）
 _RET_UP_FG = "color: #E53935"
 _RET_DOWN_FG = "color: #2EA043"
@@ -306,7 +364,7 @@ def _highlight_mgr_change(changed_codes, codes):
     """基金经理列按行高亮：近一年经理有变更的行，基金经理单元格上底色"""
 
     def _hl(col):
-        if col.name != "基金经理":
+        if _styler_col_name(col) != "基金经理":
             return [""] * len(col)
         return [_MGRCHG_BG if c in changed_codes else "" for c in codes]
 
@@ -315,7 +373,8 @@ def _highlight_mgr_change(changed_codes, codes):
 
 def _highlight_dup_rows(dup_codes):
     def _hl(row):
-        return [_DUP_BG if row["代码"] in dup_codes else ""] * len(row)
+        # 代码 恒为展示表第一列；MultiIndex 表头下行标签是 ('','代码') 元组，按位置取更稳
+        return [_DUP_BG if row.iloc[0] in dup_codes else ""] * len(row)
 
     return _hl
 
@@ -324,7 +383,7 @@ def _highlight_small_scale(small_codes, codes):
     """规模列按行高亮：只给迷你基金所在行的「规模(净资产)」单元格上底色"""
 
     def _hl(col):
-        if col.name != "规模(净资产)":
+        if _styler_col_name(col) != "规模(净资产)":
             return [""] * len(col)
         return [_SMALL_BG if c in small_codes else "" for c in codes]
 
@@ -333,12 +392,21 @@ def _highlight_small_scale(small_codes, codes):
 
 def _highlight_changes(col):
     """涨跌单元格着色（按列）：「持有较上期/较上期」↑绿底 ↓红底；
-    阶段涨幅列（近1月/近3月/近6月/近1年/今年以来/近3年/近5年）正绿字 负红字（绿=好红=差的既有语义）；
+    阶段涨幅列（近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年）正红字 负绿字（A 股红涨绿跌）；
+    同类排名(近X年) 各期 前25%红字、后25%绿字（小=好，红=好）；
     其他列与 --（未满期/无数据）不着色"""
-    if col.name in ("持有较上期", "较上期"):
+    name = _styler_col_name(col)
+    if name in ("持有较上期", "较上期"):
         def bg(v):
             return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
-    elif col.name in ("近1月", "近3月", "近6月", "近1年", "今年以来", "近3年", "近5年"):
+    elif name.startswith("同类排名("):
+        def bg(v):
+            m = re.fullmatch(r"前(\d+)%", str(v))
+            if not m:
+                return ""
+            p = int(m.group(1))
+            return _RET_UP_FG if p <= 25 else _RET_DOWN_FG if p > 75 else ""
+    elif name in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
         def bg(v):
             if v in ("--", ""):
                 return ""
@@ -446,8 +514,9 @@ def render_group(name, codes, results):
         codes_ordered = [r["代码"] for r in raw_rows]
         small_here = {r["代码"] for r in raw_rows if r.get("small")}
         mgrchg_here = {r["代码"] for r in raw_rows if r.get("mgr_chg")}
-        # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）
-        styler = disp.style.apply(_highlight_dup_rows(highlight), axis=1)
+        # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）。
+        # 表头两行分组（同类排名 跨 近1年/近3年）：展示用 MultiIndex df，CSV 导出仍用平铺列名
+        styler = grouped_header_df(disp).style.apply(_highlight_dup_rows(highlight), axis=1)
         if small_here:
             styler = styler.apply(_highlight_small_scale(small_here, codes_ordered), axis=0)
         if mgrchg_here:
