@@ -71,8 +71,10 @@ def _independent_local_data():
 
 
 def click_query(at):
-    btn = next(b for b in at.button if "开始查询" in b.label)
-    btn.click().run()
+    """点击「开始查询」的完整两段式：第一帧 armed（清旧结果、正常收尾），
+    第二帧（页面里由 iframe 自动回点，这里模拟为再点一次）执行查询"""
+    next(b for b in at.button if "开始查询" in b.label).click().run()
+    next(b for b in at.button if "开始查询" in b.label).click().run()
 
 
 def overview_dfs(at):
@@ -207,6 +209,43 @@ def test_group_reorder_persists():
     at3 = AppTest.from_file(GROUPS_PAGE, default_timeout=180)
     at3.run()
     assert "161725" in at3.text_area[0].value, "排序应持久化到 我的基金.json"
+
+
+def test_requery_clears_previous_results_before_query(monkeypatch):
+    """再次点「开始查询」为两段式：点击帧先清空上一轮结果并正常收尾，
+    第二帧（iframe 自动回点/再点一次）才执行查询。查询入口时刻会话里不得残留
+    旧结果（否则长查询期间旧表以灰色 stale 状态滞留整页）；
+    查询完成后 pending 标记必须已消费，结果正常重渲染。"""
+    import streamlit as st
+
+    import ui.query as query_mod
+    from ui.state import KEY_QUERY_PENDING, KEY_RESULTS
+
+    fake_row = {"代码": "005827", "名称": "易方达蓝筹精选混合", "类型": "混合型", "基金经理": "张坤",
+                "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
+                "r1m": None, "r3m": None, "r6m": None, "r1y": None, "rytd": None,
+                "r3y": None, "r5y": None, "holding": "", "holding_src": "--",
+                "holding_chg": "", "mgr_chg": ""}
+    captured = []  # 每次查询入口时刻的 (会话旧结果, 代码列表)
+
+    def fake_query_all(codes, with_holding, status_box, progress_bar):
+        captured.append((st.session_state.get(KEY_RESULTS), list(codes)))
+        return ({c: dict(fake_row, 代码=c) for c in codes}, {})
+
+    monkeypatch.setattr(query_mod, "query_all", fake_query_all)
+    at = query_groups([("我的基金", "005827")])
+    dfs = overview_dfs(at)
+    assert dfs and list(dfs[0]["代码"]) == ["005827"], "首轮查询应出表"
+    assert KEY_QUERY_PENDING not in at.session_state, "首轮完成后 pending 不应残留"
+    assert len(captured) == 1, captured
+
+    click_query(at)  # 第二次点开始查询（两段式）
+    dfs = overview_dfs(at)
+    assert dfs and list(dfs[0]["代码"]) == ["005827"], "再次查询后结果应重渲染"
+    assert KEY_QUERY_PENDING not in at.session_state, "查询完成后 pending 应已消费"
+    assert len(captured) == 2, captured
+    assert captured[1][0] is None, "第二次查询入口时刻，上一轮结果应已被点击帧清空"
+    assert captured[1][1] == ["005827"], captured
 
 
 # ---------------- 单只 / 经理查询页 ----------------

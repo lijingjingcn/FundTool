@@ -22,6 +22,10 @@ from ui.constants import BASE_DIR, DATA_FILE, HISTORY_FILE, HISTORY_MAX
 KEY_GROUPS = "groups"              # 侧边栏分组列表 [{id, name, codes}]
 KEY_RESULTS = "results"            # 分组查询结果 {代码: 原始行数据}，行结构见 query.fund_overview_row
 KEY_ERRORS = "errors"              # 查询失败的代码 {代码: 原因}
+KEY_QUERY_PENDING = "query_pending"  # 两段式查询：点击帧清旧结果后置位（armed），iframe 自动
+                                     # 回点/用户再点一次「开始查询」的第二帧消费并执行长查询。
+                                     # 单独一帧的目的是让旧结果大表在点击帧结束时即被清理——
+                                     # 长查询期间旧结果不再以灰色（stale 半透明）状态滞留整页
 KEY_PLAN = "plan"                  # 本次查询的分组结构 [(分组名, [代码])]
 KEY_WITH_HOLDING = "with_holding"  # 本次查询是否勾选了经理持有份额
 KEY_DUP_CODES = "dup_codes"        # 跨分组重复出现的代码集合

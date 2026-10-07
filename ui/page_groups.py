@@ -4,6 +4,7 @@ import os
 import sys
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.constants import BATCH_SIZE  # noqa: E402
@@ -17,6 +18,7 @@ from ui.state import (  # noqa: E402
     KEY_GROUPS,
     KEY_GROUP_TABS,
     KEY_PLAN,
+    KEY_QUERY_PENDING,
     KEY_RESULTS,
     KEY_WITH_HOLDING,
     load_groups,
@@ -26,6 +28,30 @@ from ui.state import (  # noqa: E402
 
 if KEY_GROUPS not in st.session_state:
     st.session_state[KEY_GROUPS] = load_groups()
+
+# 点击帧的自动回点脚本：同源 iframe 里延时找侧边栏「开始查询」按钮并程序化点击一次，
+# 把第一帧的 armed 状态转成一次真实点击 rerun。ES5 写法；点击成功即停（fired 标记），
+# 找不到按钮每 0.5 秒重试；用户抢先手点按钮同样进入第二帧，随时可接管
+_KICK_QUERY_HTML = """
+<script>
+  var fired = false;
+  function kick() {
+    if (fired) { return; }
+    try {
+      var btns = window.parent.document.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].textContent.indexOf('开始查询') >= 0) {
+          fired = true;
+          btns[i].click();
+          return;
+        }
+      }
+    } catch (err) { /* 跨域拿不到 parent 时靠重试或用户手点兜底 */ }
+    setTimeout(kick, 500);
+  }
+  setTimeout(kick, 400);
+</script>
+"""
 
 st.title("📚 分组查询")
 st.caption(
@@ -106,8 +132,27 @@ with st.sidebar:
         "查询结果缓存于 `.cache/`，基本信息 12 小时、持有份额 7 天后自动刷新"
     )
 
-# ---------------- 查询 ----------------
-if submitted:
+# ---------------- 查询（两段式） ----------------
+# 第一帧（点击帧）：清掉上一轮结果，只渲染「正在启动查询」提示，然后 st.stop() 正常
+# 收尾。本帧瞬时完成，旧的总览大表/警告条在帧结束时即被清理、从页面消失；若在同一
+# 帧里直接跑长查询，查询的几十秒到几分钟里旧结果会以灰色（stale 半透明）状态滞留
+# 整页，看起来像上一次查询的结果残留着没刷新
+if submitted and not st.session_state.get(KEY_QUERY_PENDING):
+    st.session_state[KEY_RESULTS] = None
+    st.session_state[KEY_ERRORS] = None
+    st.session_state[KEY_PLAN] = None
+    st.session_state[KEY_DUP_CODES] = set()
+    st.session_state[KEY_CODE_GROUPS] = {}
+    st.session_state[KEY_DUP_WITHIN] = {}
+    st.session_state[KEY_QUERY_PENDING] = True
+    st.info("⏳ 正在启动查询…（若几秒后仍未开始，请再点一次“开始查询”）")
+    # 注意用 components.html 而非 st.iframe：后者 height=0 时不渲染 iframe，回点不会发生
+    components.html(_KICK_QUERY_HTML, height=0)
+    st.stop()
+
+# 第二帧（回点帧）：armed 状态下再次「开始查询」（iframe 自动回点或用户手点），
+# 执行真正的查询
+if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
     plan = [(g["name"], parse_codes(g["codes"])) for g in st.session_state[KEY_GROUPS]]
     # 统计跨分组重复：同一代码出现在几个分组
     code_groups = {}
