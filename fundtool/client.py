@@ -327,6 +327,46 @@ class EastFundClient:
         self.cache.set("nnotice", art_code, data)
         return data
 
+    def fund_universe(self):
+        """天天基金全量基金代码表 [{code, name, type}]（fundcode_search.js，文件缓存 1 天）。
+        type 为细分类型字符串，如 '混合型-偏股' / '股票型' / '指数型-股票' / '债券型-混合二级'。"""
+        lst = os.path.join(self.cache.base, "fundcode_search.js")
+        if not os.path.exists(lst) or time.time() - os.path.getmtime(lst) > 86400:
+            open(lst, "wb").write(self._get("https://fund.eastmoney.com/js/fundcode_search.js").content)
+        rows = json.loads(re.search(r"\[.*\]", open(lst, encoding="utf-8-sig").read(), re.S).group(0))
+        return [{"code": c, "name": n, "type": t} for c, _, n, t, _ in rows]
+
+    def holder_structure(self, code):
+        """F10 持有人结构（FundArchivesDatas.aspx?type=cyrjg）：机构/个人/内部持有比例、总份额。
+        「内部持有比例」= 基金管理公司从业人员持有本基金的比例（页面注释口径），
+        比报告 PDF 的从业人员占比少两位小数精度，用于全市场初筛。
+        返回 {date, internal, institution, individual, total}（最新一期在前取第一条），
+        无数据（清盘/未披露）返回 {}。"""
+        cached = self.cache.get("cyrjg_v1", code, ttl=7 * 86400)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundf10.eastmoney.com/FundArchivesDatas.aspx",
+            params={"type": "cyrjg", "code": code},
+        )
+        m = re.search(
+            r"<tr><td>(\d{4}-\d{2}-\d{2})</td><td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>"
+            r"<td[^>]*>([^<]*)</td><td[^>]*>([^<]*)</td>",
+            r.text,
+        )
+        out = {}
+        if m:
+            date, inst, indiv, internal, total = m.groups()
+            out = {
+                "date": date,
+                "institution": inst.strip(),
+                "individual": indiv.strip(),
+                "internal": internal.strip(),
+                "total": total.strip(),
+            }
+        self.cache.set("cyrjg_v1", code, out)
+        return out
+
     def download_pdf(self, url, filename):
         """下载公告 PDF 到缓存目录；自动处理 JS 反爬挑战。返回本地路径。"""
         dest = os.path.join(self.pdf_dir, filename)

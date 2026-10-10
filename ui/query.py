@@ -68,6 +68,22 @@ def mgr_change_label(tenure_rows):
     return "+".join(p for p, on in (("新任", new), ("离任", left)) if on)
 
 
+def emp_nums(emp):
+    """employees_exact 缓存 {'shares','pct'} -> (float|None, float|None)。
+    旧缓存 pct 可能带 %，一并兼容；解析失败返回 (None, None)。"""
+    if not emp or not emp.get("shares"):
+        return None, None
+    try:
+        shares = float(str(emp["shares"]).replace(",", "").replace("，", ""))
+    except ValueError:
+        return None, None
+    try:
+        pctv = float(str(emp.get("pct", "")).replace("%", "").strip())
+    except ValueError:
+        pctv = None
+    return shares, pctv
+
+
 def fund_overview_row(code, with_holding=True):
     """单只基金的原始数据行（分组查询与经理视图共用）。基金不存在返回 None。
 
@@ -79,6 +95,11 @@ def fund_overview_row(code, with_holding=True):
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
+      emp_shares  float|None  从业人员持有精确份额总数（份，全基金合计口径）
+      emp_pct     float|None  从业人员持有占基金总份额比例（%，合计口径）
+      emp_cls     str         查询代码所属份额级别字母（'A'/'C'…，基金简称末尾），''=单级别
+      emp_cls_shares float|None  该级别的从业人员持有份额（份；报表无级别行时为 None）
+      emp_cls_pct float|None  该级别的从业人员占该级别总份额比例（%）
       holding_src str         持有数据来源（'2026-08-31中报'）或失败原因
       holding_chg str         较上期变化（'升N档'/'降N档'/'持平'），''=无对比
       mgr_chg     str         近一年经理变更（'新任'/'离任'/'新任+离任'），''=无
@@ -118,6 +139,11 @@ def fund_overview_row(code, with_holding=True):
         "r3y_peer_pct": pr.get("r3y"),
         "r5y_peer_pct": pr.get("r5y"),
         "holding": "",
+        "emp_shares": None,
+        "emp_pct": None,
+        "emp_cls": "",
+        "emp_cls_shares": None,
+        "emp_cls_pct": None,
         "holding_src": "",
         "holding_chg": "",
         # 近一年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
@@ -129,6 +155,13 @@ def fund_overview_row(code, with_holding=True):
             if hold["status"] == "ok":
                 tag = "中报" if "中期" in hold.get("report_title", "") else "年报"
                 row["holding"] = hold.get("manager_range") or ""
+                row["emp_shares"], row["emp_pct"] = emp_nums(hold.get("employees_exact"))
+                # 多级别报表：取查询代码所属级别的从业人员行（基金简称末尾字母）
+                m = re.search(r"([A-Z])$", row["名称"].strip())
+                if m:
+                    row["emp_cls"] = m.group(1)
+                    cv = (hold.get("employees_exact") or {}).get("classes", {}).get(m.group(1))
+                    row["emp_cls_shares"], row["emp_cls_pct"] = emp_nums(cv)
                 row["holding_src"] = f"{hold.get('report_date', '')}{tag}"
             else:
                 row["holding_src"] = hold.get("error", "获取失败")

@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
-"""从基金定期报告（年度报告/中期报告）PDF 中提取“基金经理持有本基金”的份额区间。
+"""从基金定期报告（年度报告/中期报告）PDF 中提取“基金经理持有本基金”的份额区间，
+以及“基金管理人所有从业人员持有本基金”的精确份额总数。
 
 披露口径（证监会《公开募集证券投资基金信息披露内容与格式准则》）：
 - 中报/年报的“基金份额持有人信息”章节披露期末基金管理人从业人员持有本基金的情况；
 - “本基金基金经理持有本开放式基金”一行给出区间（万份）：0 / 0-10 / 10-50 / 50-100 / >100；
   部分旧格式报表的行名为“基金经理等人员”；
+- “基金管理人所有从业人员持有本基金”一行给出精确份额总数（份）与占基金总份额比例；
 - 该数据一年最多更新两次（中报 8 月底前、年报次年 3 月底前披露）。
 """
 import re
@@ -149,31 +151,99 @@ def _find_manager_line(lines, share_class=None):
     return None
 
 
-def _find_employees_exact(lines):
-    """提取“从业人员持有本基金”的精确份额总数（新格式报表披露）。
+# 9.3 区间小节标题特征（“……持有本开放式基金份额总量区间情况”）：9.2 小节的截止线
+_SEC_RANGE_HEAD = re.compile(r"区间情况")
+# 精确数值（份额/占比）：千分位分隔或带小数；区间档位值（0 / 10~50 / >100）不匹配
+_PRECISE_NUM = re.compile(r"\d{1,3}(?:[,，]\d{3})+(?:\.\d+)?|\d+\.\d+")
 
-    数值必须出现在标签之后，避免误抓章节编号（如“8.2 期末基金管理人的…”）。
-    分级基金的标签会被折行，此时取其后的“合计”行（精确份额带千分位和百分比）。
-    """
-    for line in lines:
-        if "从业人员持有本基金" not in line or _TOC_LINE.search(line):
+
+def _line_two_nums(text):
+    """行内前两个精确数值（份额、占比），按列位置区分——占比列的 % 常只在表头，
+    值是裸数字（如“合计 552,727.27 0.06986”），不能靠 % 字符判断。无则返回 (None, None)"""
+    nums = _PRECISE_NUM.findall(text)
+    if not nums:
+        return None, None
+    return nums[0], (nums[1] if len(nums) > 1 else "")
+
+
+def _employees_class_rows(sec):
+    """9.2 小节内各份额级别的从业人员行：{级别字母: {'shares','pct'}}（不含合计行）。
+    级别字母取行内最后一个独立大写字母（可带“类”），与经理区间表的 _class_map 同款规则；
+    9.3 区间表的级别行是档位值（0~10/>100），_line_two_nums 不匹配，不会混入。"""
+    out = {}
+    for l in sec:
+        if "合计" in l or "的情况" in l or _TOC_LINE.search(l):
             continue
-        after = line.split("从业人员持有本基金", 1)[1]
-        m = re.search(r"\d[\d,，]*(?:\.\d+)?", after)
-        if m:
-            pct = re.search(r"[\d.]+%", after)
-            return {"shares": m.group(0), "pct": pct.group(0) if pct else ""}
-    # 标签折行（如“基金管理人所有从业人”/“员持有本基金”）：找随后的合计行
-    for j, line in enumerate(lines):
-        if _TOC_LINE.search(line) or "从业" not in line or "的情况" in line:
-            continue  # 跳过章节标题行，锚定真正的表格标签
-        for l2 in lines[j + 1 : j + 8]:
-            if "合计" in l2:
-                m = re.search(r"\d{1,3}(?:[,\s，]\d{3})+(?:\.\d+)?", l2)
-                pct = re.search(r"[\d.]+%", l2)
-                if m and pct:
-                    return {"shares": m.group(0), "pct": pct.group(0)}
-        break
+        m = _last_class_mark(l)
+        if not m:
+            continue
+        shares, pct = _line_two_nums(l)
+        if shares:
+            out[m] = {"shares": shares, "pct": pct}
+    return out
+
+
+def _find_employees_exact(lines):
+    """提取「基金管理人所有从业人员持有本基金」的精确份额总数与占比，
+    及各份额级别明细（classes，无级别行时省略该键）。
+
+    标签常被 PDF 折行打碎（基金管/理人所/有从业/人员持/有本基金 各自成行、
+    与份额级别行交错），靠标签锚定不可行——改为锚定含「从业」的行（小节标题
+    或标签残片），窗口止于「区间情况」标题或下一编号标题：
+    - 分级基金取「合计」行（全基金口径；9.3 的区间合计是 0~10/>100 档位，
+      _PRECISE_NUM 不匹配，误入也不会取到）；
+    - 单级基金取完整标签行「…从业人员持有本基金 8,038,597.09 0.05%»，
+      数值可能折到下一行（标题行以“的情况”结尾，自动跳过）；
+    - 标签断在「持/有」或「从业人|员持有」之间时，数值与残片同行或独立成行：
+      「…从业人员持 / 894,804.86 0.11% / 有本基金」「…所有从业人 / 886,488.66 0.1483% / 员持有本基金」；
+    - 文字版式「基金管理人的从业人员未持有本基金。」或小节正文仅「无。」按 0 处理。
+    """
+    for start, line in enumerate(lines):
+        if "从业" not in line or _TOC_LINE.search(line):
+            continue
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if _SEC_RANGE_HEAD.search(lines[j]) or _SECTION_HEAD.match(lines[j]):
+                end = j
+                break
+        sec = lines[start:end]
+        classes = _employees_class_rows(sec)
+        for l in sec:  # 分级基金：「合计」行
+            if "合计" in l and not _TOC_LINE.search(l):
+                shares, pct = _line_two_nums(l)
+                if shares:
+                    out = {"shares": shares, "pct": pct}
+                    if classes:
+                        out["classes"] = classes
+                    return out
+        for k, l in enumerate(sec):  # 单级基金：完整标签行
+            if "从业人员持有本基金" not in l or "的情况" in l or _TOC_LINE.search(l):
+                continue
+            after = l.split("从业人员持有本基金", 1)[1]
+            if not _PRECISE_NUM.search(after) and k + 1 < len(sec):  # 数值折行
+                after += " " + sec[k + 1]
+            shares, pct = _line_two_nums(after)
+            if shares:
+                out = {"shares": shares, "pct": pct}
+                if classes:
+                    out["classes"] = classes
+                return out
+        for mark in ("从业人员持", "所有从业"):  # 标签残片行：数值同行或在下一行
+            for k, l in enumerate(sec):
+                if mark not in l or "的情况" in l or _TOC_LINE.search(l):
+                    continue
+                after = l.split(mark, 1)[1]
+                if not _PRECISE_NUM.search(after) and k + 1 < len(sec):
+                    after += " " + sec[k + 1]
+                shares, pct = _line_two_nums(after)
+                if shares:
+                    out = {"shares": shares, "pct": pct}
+                    if classes:
+                        out["classes"] = classes
+                    return out
+        for l in sec:  # 文字版式：从业人员未持有 / 小节正文「无。」
+            if ("从业" in l and "未持有" in l) or l.strip() in ("无。", "无"):
+                return {"shares": "0.00", "pct": ""}
     return None
 
 

@@ -27,7 +27,7 @@ KEY_QUERY_PENDING = "query_pending"  # 两段式查询：点击帧清旧结果�
                                      # 单独一帧的目的是让旧结果大表在点击帧结束时即被清理——
                                      # 长查询期间旧结果不再以灰色（stale 半透明）状态滞留整页
 KEY_PLAN = "plan"                  # 本次查询的分组结构 [(分组名, [代码])]
-KEY_WITH_HOLDING = "with_holding"  # 本次查询是否勾选了经理持有份额
+KEY_WITH_HOLDING = "with_holding"  # 本次查询是否勾选了经理/从业人员持有份额
 KEY_DUP_CODES = "dup_codes"        # 跨分组重复出现的代码集合
 KEY_CODE_GROUPS = "code_groups"    # {代码: [出现的分组名]}
 KEY_DUP_WITHIN = "dup_within"      # {分组名: {代码: 输入次数}} 组内重复输入
@@ -39,6 +39,8 @@ KEY_GROUP_TABS = "group_tabs"      # 分组结果 st.tabs 的选中分组（stat
 
 # 单只/经理查询页
 KEY_SINGLE_CODE = "single_result_code"    # 当前查看详情的基金代码
+KEY_SCREEN_PENDING = "screen_pending"     # 全市场筛选页的两段式 armed 标记（同分组页 KEY_QUERY_PENDING）
+KEY_SCREEN_RESULT = "screen_result"       # 全市场筛选结果行列表（复核后的最终行，见 page_screen）
 KEY_DETAIL_SCOPE = "detail_scope"         # 详情显示位置："page"=页面底部 / "manager"=经理视图内就地显示
 KEY_DETAIL_MANAGER = "detail_manager_id"  # 就地详情所属经理视图的经理 ID
 KEY_DETAIL_PAGE = "detail_page"           # 详情是在哪一页打开的（"groups"/"single"）：

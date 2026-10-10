@@ -125,20 +125,180 @@ def test_range_token_rejects_thousands_separator_prefix():
 
 
 def test_employees_exact_number_after_label():
-    """占比列多数报告不带 % 号：此时只取到精确份额，pct 为空"""
+    """占比列的 % 常只在表头、值是裸数字：按位置取第二个数为占比（不带 % 存储）"""
     lines = ["基金管理人所有从业人员持有本基金 297,982.82 0.021504"]
-    assert _find_employees_exact(lines) == {"shares": "297,982.82", "pct": ""}
+    assert _find_employees_exact(lines) == {"shares": "297,982.82", "pct": "0.021504"}
 
 
 def test_employees_exact_with_percent_sign():
     lines = ["基金管理人所有从业人员持有本基金 123,456.78 5.5%"]
-    assert _find_employees_exact(lines) == {"shares": "123,456.78", "pct": "5.5%"}
+    assert _find_employees_exact(lines) == {"shares": "123,456.78", "pct": "5.5"}
 
 
 def test_employees_exact_folds_to_total_line():
-    """标签折行时取随后的合计行（精确份额带千分位和百分比）"""
+    """标签折行时取随后的合计行（精确份额带千分位；占比按位置取，有无 % 均可）"""
     lines = ["基金管理人的从业人", "员持有本开放式基金", "合计 33,998,609.13 10.978363%"]
-    assert _find_employees_exact(lines) == {"shares": "33,998,609.13", "pct": "10.978363%"}
+    assert _find_employees_exact(lines) == {"shares": "33,998,609.13", "pct": "10.978363"}
+
+
+def test_employees_exact_fully_fragmented_label_takes_total():
+    """标签被 PDF 彻底打碎（基金管/理人所/有从业/人员持/有本基金 与级别行交错，
+    “从业人员持有”四字都被拆开）：锚定小节标题行取「合计」（真实版式：景顺长城改革机遇）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "项目 份额级别 持有份额总数（份） 占基金总份额比例（%）",
+        "基金管 景顺长城改革机遇混合A类 9,021,579.86 10.506199",
+        "理人所",
+        "有从业",
+        "人员持 景顺长城改革机遇混合C类 16,799.05 0.074446",
+        "有本基",
+        "金",
+        "合计 9,038,378.91 8.335325",
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "本公司高级管理人员、 景顺长城改革机遇混合A类 >100",
+        "合计 >100",
+    ]
+    assert _find_employees_exact(lines) == {
+        "shares": "9,038,378.91", "pct": "8.335325",
+        "classes": {"A": {"shares": "9,021,579.86", "pct": "10.506199"},
+                    "C": {"shares": "16,799.05", "pct": "0.074446"}},
+    }
+
+
+def test_employees_exact_single_class_after_heading():
+    """单级基金：小节标题后的完整标签行（标题行自身以“的情况”结尾不得取数）"""
+    lines = [
+        "8.2 期末基金管理人的从业人员持有本基金的情况",
+        "项目 持有份额总数（份） 占基金总份额比例",
+        "基金管理人所有从业人员持有本基金 8,038,597.09 0.05%",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "8,038,597.09", "pct": "0.05"}
+
+
+def test_employees_exact_value_folded_to_next_line():
+    """完整标签行的数值折到下一行"""
+    lines = [
+        "8.2 期末基金管理人的从业人员持有本基金的情况",
+        "基金管理人所有从业人员持有本基金",
+        "101.63 0.000174",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "101.63", "pct": "0.000174"}
+
+
+def test_employees_exact_range_section_total_not_picked():
+    """只有 9.3 区间表（窗口从 9.3 标题开始）时：区间档位的「合计 >100」不是精确份额，不得误取"""
+    lines = [
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "项目 持有基金份额总量的数量区间（万份）",
+        "本公司高级管理人员、 0~10",
+        "合计 >100",
+    ]
+    assert _find_employees_exact(lines) is None
+
+
+def test_employees_exact_label_breaks_before_you_with_value_on_fragment():
+    """标签断在「从业人员持|有本基金」之间且数值与残片同行（真实版式：国泰金龙行业精选）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "项目 持有份额总数（份） 占基金总份额比例",
+        "基金管理人所有从业人员持 894,804.86 0.11%",
+        "有本基金",
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "894,804.86", "pct": "0.11"}
+
+
+def test_employees_exact_fragment_value_on_own_line():
+    """标签残片行不带数值、数值独立成行（真实版式：…从业人员持 / 894,804.86 0.11% / 有本基金）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "项目 持有份额总数（份） 占基金总份额比例",
+        "基金管理人所有从业人员持",
+        "894,804.86 0.11%",
+        "有本基金",
+        "9.3期末基金管理人的从业人员持有本开放式基金份额总量区间的情况",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "894,804.86", "pct": "0.11"}
+
+
+def test_employees_exact_label_breaks_inside_congye():
+    """标签断在「所有从业人|员持有本基金」之间（真实版式：海富通收益增长）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "项目 持有份额总数（份） 占基金总份额比例",
+        "基金管理人所有从业人",
+        "886,488.66 0.1483%",
+        "员持有本基金",
+        "9.3期末基金管理人的从业人员持有本开放式基金份额总量区间的情况",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "886,488.66", "pct": "0.1483"}
+
+
+def test_employees_exact_section_body_wu_means_zero():
+    """小节正文仅「无。」：按 0 处理（真实版式：工银新经济混合，9.3 区间表各级别均为 0）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "无。",
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "本基金基金经理持有本开放式基金 0",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "0.00", "pct": ""}
+
+
+def test_employees_exact_with_class_rows():
+    """分级基金：合计口径 + 各份额级别行（classes）。真实版式：广发逆向策略 2026 中报——
+    员工几乎全持 A 类，A 类口径 6.81% 是合计 3.46% 的近两倍（分母不同）"""
+    lines = [
+        "8.3 期末基金管理人的从业人员持有本基金的情况",
+        "项目 份额级别 持有份额总数（份） 占基金总份额比例",
+        "广发逆向策略混合A 2,259,169.66 6.8095%",
+        "基金管理人所有从业人员持",
+        "广发逆向策略混合C 94.28 0.0003%",
+        "有本基金",
+        "合计 2,259,263.94 3.4635%",
+        "8.4期末基金管理人的从业人员持有本开放式基金份额总量区间的情况",
+    ]
+    assert _find_employees_exact(lines) == {
+        "shares": "2,259,263.94", "pct": "3.4635",
+        "classes": {
+            "A": {"shares": "2,259,169.66", "pct": "6.8095"},
+            "C": {"shares": "94.28", "pct": "0.0003"},
+        },
+    }
+
+
+def test_employees_class_rows_not_polluted_by_range_section():
+    """classes 只收 9.2 精确表：9.3 区间表的级别行（档位值）不得混入（窗口已截止）"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "海富通均衡甄选混合A 7,887,482.53 1.6262%",
+        "基金管理人所有从业人",
+        "海富通均衡甄选混合C 151,114.56 0.0132%",
+        "员持有本基金",
+        "合计 8,038,597.09 0.4945%",
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "本公司高级管理人员、基 海富通均衡甄选混合A >100",
+        "本基金基金经理持有本开 海富通均衡甄选混合C 0",
+    ]
+    emp = _find_employees_exact(lines)
+    assert emp == {
+        "shares": "8,038,597.09", "pct": "0.4945",
+        "classes": {
+            "A": {"shares": "7,887,482.53", "pct": "1.6262"},
+            "C": {"shares": "151,114.56", "pct": "0.0132"},
+        },
+    }, emp
+
+
+def test_employees_exact_prose_not_held_means_zero():
+    """文字版式：「报告期末，基金管理人的从业人员未持有本基金。」按 0 处理"""
+    lines = [
+        "9.2 期末基金管理人的从业人员持有本基金的情况",
+        "报告期末，基金管理人的从业人员未持有本基金。",
+        "9.3 期末基金管理人的从业人员持有本开放式基金份额总量区间情况",
+        "本基金基金经理持有本开放式基金 0",
+    ]
+    assert _find_employees_exact(lines) == {"shares": "0.00", "pct": ""}
 
 
 # ---------------- 区间档位与格式化 ----------------

@@ -20,6 +20,7 @@ from fundtool import (
 )
 from ui.constants import HISTORY_N, SMALL_NAV_YUAN, TWO_LINE_HEADERS
 from ui.query import (
+    emp_nums,
     fund_overview_row,
     group_manager_agg,
     manager_dir_index,
@@ -85,6 +86,33 @@ def peer_pct(value):
         return "--"
 
 
+def _trim_pct(pct_val):
+    """占比数值 -> 最多 4 位小数去尾零的字符串（8.335325 -> '8.3353'）"""
+    return f"{pct_val:.4f}".rstrip("0").rstrip(".")
+
+
+def fmt_employee_holding(shares, pct_val):
+    """从业人员精确份额 -> '903.84万份(8.3353%)'（份额过万折算万份、占比最多4位小数去尾零；
+    0 -> '0（无人持有）'；None -> '--'）。展示格式化集中在此，别处不得拼展示文案。"""
+    if shares is None:
+        return "--"
+    if shares == 0:
+        return "0（无人持有）"
+    body = f"{shares / 1e4:,.2f}万份" if shares >= 1e4 else f"{shares:,.2f}份"
+    if pct_val is None:
+        return body
+    return f"{body}({_trim_pct(pct_val)}%)"
+
+
+def fmt_employee_holding_pair(cls_letter, cls_pct, tot_shares, tot_pct):
+    """多级别基金的双口径：'A类 6.81% / 合计 225.93万份(3.46%)'——查询代码所属
+    级别按该级别份额为分母、合计按全基金总份额为分母；级别行缺失时退回合计
+    单值格式（fmt_employee_holding）。"""
+    if not cls_letter or cls_pct is None:
+        return fmt_employee_holding(tot_shares, tot_pct)
+    return f"{cls_letter}类 {_trim_pct(cls_pct)}% / 合计 {fmt_employee_holding(tot_shares, tot_pct)}"
+
+
 def display_row(row):
     """原始行 -> 总览表展示行（列名即表头）。格式化集中在此，别处不得拼展示文案。"""
     scale = yi(row.get("nav_yuan"))
@@ -110,6 +138,9 @@ def display_row(row):
         "同类排名(近3年)": peer_pct(row.get("r3y_peer_pct")),
         "同类排名(近5年)": peer_pct(row.get("r5y_peer_pct")),
         "基金经理持有本基金": format_range(row.get("holding")) or "--",
+        "从业人员持有本基金": fmt_employee_holding_pair(
+            row.get("emp_cls"), row.get("emp_cls_pct"), row.get("emp_shares"), row.get("emp_pct")
+        ),
         "持有数据来源": row.get("holding_src") or "--",
         "持有较上期": _fmt_change(row.get("holding_chg")),
     }
@@ -131,6 +162,7 @@ def display_sort_values(rows):
         "同类排名(近3年)": [r.get("r3y_peer_pct") for r in rows],
         "同类排名(近5年)": [r.get("r5y_peer_pct") for r in rows],
         "基金经理持有本基金": [range_rank(r.get("holding")) for r in rows],
+        "从业人员持有本基金": [r.get("emp_shares") for r in rows],
         "持有较上期": [_chg_sort_key(r.get("holding_chg")) for r in rows],
     }
 
@@ -191,17 +223,21 @@ def render_fund_detail(code, with_holding=None):
         f"- [查看基金档案 ↗](https://fundf10.eastmoney.com/{code}.html)"
     )
     if with_holding:
-        st.markdown("**基金经理持有本基金（来自定期报告）**")
+        st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
         hold = get_manager_holding(get_client(), code)
         if hold["status"] == "ok":
             rng = format_range(hold.get("manager_range"))
+            emp_shares, emp_pct = emp_nums(hold.get("employees_exact"))
+            emp_cls_val = None
+            _m = re.search(r"([A-Z])$", (info.get("SHORTNAME") or "").strip())
+            if _m:
+                emp_cls_val = (hold.get("employees_exact") or {}).get("classes", {}).get(_m.group(1))
+            emp_cls_shares, emp_cls_pct = emp_nums(emp_cls_val)
             m1, m2 = st.columns(2)
             m1.metric("基金经理持有份额（区间）", rng or "见报告原文")
-            emp = hold.get("employees_exact") or {}
             m2.metric(
-                "公司从业人员合计持有",
-                f"{emp.get('shares', '--')} 份" if emp.get("shares") else "--",
-                emp.get("pct") or None,
+                "公司从业人员持有",
+                fmt_employee_holding_pair(_m.group(1) if _m else "", emp_cls_pct, emp_shares, emp_pct),
             )
             st.caption(
                 f"来源：《{hold.get('report_title')}》（发布于 {hold.get('report_date')}）"
@@ -212,6 +248,16 @@ def render_fund_detail(code, with_holding=None):
             if hold.get("manager_ranges"):
                 parts = "；".join(f"{k} {format_range(v)}" for k, v in hold["manager_ranges"].items())
                 st.caption(f"各份额级别明细（展示值为查询代码所属级别）：{parts}")
+            emp_classes = (hold.get("employees_exact") or {}).get("classes") or {}
+            if emp_classes:
+                parts = []
+                for k, v in emp_classes.items():
+                    try:
+                        p = _trim_pct(float(str(v.get("pct", "")).replace("%", "")))
+                    except ValueError:
+                        p = "--"
+                    parts.append(f"{k}类 {v.get('shares')}份({p}%)")
+                st.caption(f"从业人员各份额级别（分母为该级别份额，与合计口径不同）：{'；'.join(parts)}")
             try:
                 hist = get_manager_holding_history(get_client(), code, HISTORY_N)
             except FundApiError:
@@ -258,9 +304,9 @@ def render_manager_funds(m, page=""):
         f"现任基金 {len(m['codes'])} 只 · 在管总规模 {m['scale']} · "
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
-    # 与分组总览同一套列：含基金经理持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位）
+    # 与分组总览同一套列：含基金经理持有本基金、从业人员持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位、从业人员按精确份额）
     raw_rows, small_here, mgrchg_here = [], set(), set()
-    with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理持有份额，首次查询每只约 3~10 秒）…") as _mst:
+    with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理/从业人员持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
             _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
             try:
@@ -273,7 +319,9 @@ def render_manager_funds(m, page=""):
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
                        "r2y": None, "rytd": None, "r3y": None, "r5y": None,
                        "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
-                       "holding": "", "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
+                       "holding": "", "emp_shares": None, "emp_pct": None,
+                       "emp_cls": "", "emp_cls_shares": None, "emp_cls_pct": None,
+                       "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
             else:
                 if row["small"]:
                     small_here.add(_code)
@@ -289,7 +337,7 @@ def render_manager_funds(m, page=""):
         sort_values=display_sort_values(raw_rows),
         title=f"基金信息-经理{m['name']}.csv",
     )
-    st.caption("点击基金查看完整详情（含基金经理持有份额）")
+    st.caption("点击基金查看完整详情（含基金经理/从业人员持有份额）")
     _mvcols = st.columns(4)
     for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
         with _mvcols[_i % 4]:
@@ -491,7 +539,7 @@ def render_manager_drilldown(name, items):
     （与「单只/经理查询」同款视图：逐基金查询含经理持有份额、点表头排序、点基金看详情）"""
     if not items:
         return
-    st.caption("👤 点经理按钮查看其**全部在管基金**（同「单只/经理查询」：含经理持有份额、可排序、点基金看详情；首次查询每位经理约需数秒到几十秒）")
+    st.caption("👤 点经理按钮查看其**全部在管基金**（同「单只/经理查询」：含经理/从业人员持有份额、可排序、点基金看详情；首次查询每位经理约需数秒到几十秒）")
     cols = st.columns(4)
     view = st.session_state.get(KEY_GROUP_MGR_VIEW) or {}
     for i, it in enumerate(items):

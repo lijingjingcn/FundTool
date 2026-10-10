@@ -4,6 +4,7 @@
 页面（侧边栏导航切换，会话数据互通）：
 - 📚 分组查询    —— 按分组批量查询，总览表 + 详情 + CSV 导出 + 每组经理汇总与经理在管基金下钻
 - 🔍 单只/经理查询 —— 代码直达、名称/经理姓名搜索、经理在管基金总览、查询历史
+- 🌐 全市场筛选   —— 按员工持有占比区间筛选全部混合/股票型基金（F10 初筛 + 报告 PDF 复核）
 - 🌏 宏观指标    —— 股债性价比（多指数分位）、中美国债收益率与汇率、CPI/PPI/PMI/GDP/M2 等月度指标
 
 代码分层：fundtool/ 为纯数据层；ui/ 分为 constants（常量）→ state（会话键与持久化）
@@ -20,6 +21,7 @@ page = st.navigation(
     [
         st.Page("ui/page_groups.py", title="分组查询", icon="📚", default=True),
         st.Page("ui/page_single.py", title="单只 / 经理查询", icon="🔍"),
+        st.Page("ui/page_screen.py", title="全市场筛选（员工持有）", icon="🌐"),
         st.Page("ui/page_macro.py", title="宏观指标", icon="🌏"),
     ]
 )

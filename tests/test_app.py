@@ -35,7 +35,7 @@ from ui.query import (  # noqa: E402
     group_manager_agg,
     mgr_change_label,
 )
-from ui.render import display_row, manager_summary_rows, peer_pct, pct  # noqa: E402
+from ui.render import display_row, fmt_employee_holding, manager_summary_rows, peer_pct, pct  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_MANAGER,
     KEY_DETAIL_PAGE,
@@ -127,6 +127,7 @@ def test_group_query_basic():
     row = df.iloc[0]
     assert row["名称"] == "易方达蓝筹精选混合", row["名称"]
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
+    assert row["从业人员持有本基金"] == "854.48万份(0.0639%)", row["从业人员持有本基金"]
     assert any("999999" in e.value for e in at.error), [e.value for e in at.error]
     assert "持有较上期" in df.columns, df.columns
     assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", row["持有较上期"]), row["持有较上期"]
@@ -142,11 +143,14 @@ def test_group_query_basic():
 
 
 def test_share_class_a_row():
-    """多级别报表按查询代码的份额级别取行：010790（A类）经理 A 类 >100"""
+    """多级别报表按查询代码的份额级别取行：010790（A类）经理 A 类 >100；
+    从业人员双口径：A类 1.6262%（A类份额为分母）/ 合计 803.86万份(0.4945%)"""
     at = query_groups([("我的基金", "010790")])
     df = overview_dfs(at)[0]
     row = df[df["代码"] == "010790"].iloc[0]
     assert row["基金经理持有本基金"] == ">100万份", f"010790 解析错误: {row['基金经理持有本基金']}"
+    assert row["从业人员持有本基金"] == "A类 1.6262% / 合计 803.86万份(0.4945%)", \
+        f"010790 从业人员双口径错误: {row['从业人员持有本基金']}"
 
 
 def test_share_class_c_not_mixed_into_a():
@@ -455,7 +459,9 @@ def test_peer_rank_column_display_and_coloring():
     assert ("同类排名", "近5年") in gdf.columns, "三列排名都应归入同类排名组"
     assert ("", "规模(净资产)") in gdf.columns, "单独的「规模(净资产)」不得被拆成两行"
     assert ("基金经理", "持有本基金") in gdf.columns, "超长表头应拆成两行（TWO_LINE_HEADERS）"
+    assert ("从业人员", "持有本基金") in gdf.columns, "从业人员持有列也应拆成两行（TWO_LINE_HEADERS）"
     assert _styler_col_name(gdf[("基金经理", "持有本基金")]) == "基金经理持有本基金", "归一列名应还原平铺名"
+    assert _styler_col_name(gdf[("从业人员", "持有本基金")]) == "从业人员持有本基金", "归一列名应还原平铺名"
     assert _highlight_changes(gdf[("同类排名", "近1年")]) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""], \
         "完整元组列名选中（Styler.apply 实际传入的形式）才能命中归一逻辑"
     # 经理视图（HTML 排序表）路径：数值排序键 + 同样的颜色语义
@@ -474,6 +480,29 @@ def test_pct_format():
     assert pct(None) == "--"
     assert pct("") == "--"
     assert pct("abc") == "--"
+
+
+def test_fmt_employee_holding():
+    """从业人员持有格式化：过万折算万份两位小数、不足万显示原值份；
+    占比最多4位小数去尾零；0/None 兜底"""
+    assert fmt_employee_holding(8544761.74, 0.0639) == "854.48万份(0.0639%)"
+    assert fmt_employee_holding(9038378.91, 8.335325) == "903.84万份(8.3353%)"
+    assert fmt_employee_holding(101.63, 0.000174) == "101.63份(0.0002%)"
+    assert fmt_employee_holding(297982.82, None) == "29.80万份"
+    assert fmt_employee_holding(0, 0.0) == "0（无人持有）"
+    assert fmt_employee_holding(None, None) == "--"
+
+
+def test_fmt_employee_holding_pair():
+    """多级别基金双口径：'A类 6.81% / 合计 225.93万份(3.46%)'；
+    级别行缺失/单级别退回合计单值格式"""
+    from ui.render import fmt_employee_holding_pair
+    assert fmt_employee_holding_pair("A", 6.8095, 2259263.94, 3.4635) == \
+        "A类 6.8095% / 合计 225.93万份(3.4635%)"
+    assert fmt_employee_holding_pair("A", 1.6262, 8038597.09, 0.4945) == \
+        "A类 1.6262% / 合计 803.86万份(0.4945%)"
+    assert fmt_employee_holding_pair("A", None, 2259263.94, 3.4635) == "225.93万份(3.4635%)"
+    assert fmt_employee_holding_pair("", None, None, None) == "--"
 
 
 def test_highlight_changes_coloring():
@@ -499,8 +528,12 @@ def test_fund_overview_row_raw_and_display():
     assert isinstance(raw["r1y_peer_pct"], float), raw  # 近1年同类排名百分位
     assert isinstance(raw["r3y_peer_pct"], float), raw  # 近3年同类排名百分位
     assert isinstance(raw["r5y_peer_pct"], float), raw  # 近5年同类排名百分位
+    assert raw["emp_shares"] == 8544761.74, raw  # 从业人员精确份额（份）
+    assert raw["emp_pct"] == 0.0639, raw  # 占基金总份额比例（%）
+    assert raw["emp_cls"] == "" and raw["emp_cls_pct"] is None, raw  # 单级别基金无级别行，退回合计口径
     disp = display_row(raw)
     assert disp["基金经理持有本基金"] == ">100万份", disp
+    assert disp["从业人员持有本基金"] == "854.48万份(0.0639%)", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
     assert disp["近1年"] == pct(raw["r1y"]) and disp["近1年"].endswith("%"), disp
     assert disp["近2年"] == pct(raw["r2y"]), disp
@@ -628,3 +661,36 @@ def test_macro_page_renders():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_screen_bucket_and_merge():
+    """全市场筛选页：类型桶归类（混合型子类独立可选）+ 同基金多份额级别合并（按公告ID）"""
+    from ui.page_screen import TYPE_BUCKETS, bucket_of, merge_class_rows
+    assert bucket_of("混合型-偏股") == "混合型-偏股"
+    assert bucket_of("混合型-偏债") == "混合型-偏债"
+    assert bucket_of("混合型-灵活") == "混合型-灵活"
+    assert bucket_of("混合型-绝对收益") == "混合型-绝对收益"
+    assert bucket_of("股票型") == "股票型"
+    assert bucket_of("指数型-股票") == "指数型-股票"
+    assert bucket_of("QDII-混合偏股") == "QDII（股票/混合）"
+    assert bucket_of("债券型-混合二级") is None
+    # 混合型各子类桶的并集须覆盖全部「混合型-*」细分（fundcode_search 的口径）
+    mixed = {"混合型-偏股", "混合型-偏债", "混合型-灵活", "混合型-平衡", "混合型-绝对收益"}
+    covered = {t for types in TYPE_BUCKETS.values() for t in types if t.startswith("混合型")}
+    assert covered == mixed, covered
+    rows = [
+        {"code": "000423", "name": "前海开源事件驱动混合A", "type": "混合型-灵活",
+         "emp_pct": 23.98, "emp_shares": 1.0, "manager_range": ">100",
+         "report": "2026-08-31中报", "art": "AN1"},
+        {"code": "000424", "name": "前海开源事件驱动混合C", "type": "混合型-灵活",
+         "emp_pct": 20.0, "emp_shares": 1.0, "manager_range": ">100",
+         "report": "2026-08-31中报", "art": "AN1"},
+        {"code": "000326", "name": "南方中小盘成长股票A", "type": "股票型",
+         "emp_pct": 2.04, "emp_shares": 2.0, "manager_range": "",
+         "report": "2026-08-31中报", "art": "AN2"},
+    ]
+    merged = merge_class_rows(rows)
+    assert len(merged) == 2, merged
+    assert merged[0]["codes"] == "000423 000424", merged[0]  # 高占比级别在前，低级别并入
+    assert merged[0]["emp_pct"] == 23.98
+    assert merged[1]["codes"] == "000326"
