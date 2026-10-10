@@ -71,6 +71,31 @@ def merge_class_rows(rows):
     return final
 
 
+def _enrich_managers(rows):
+    """给结果行补基金经理姓名（managers，顿号分隔）与净资产规模（nav_yi，亿）。
+    basic_info 12 小时缓存：复核路径在解析报告/规模过滤时已查过（纯缓存命中），
+    快筛路径逐只补查（约 0.6 秒/只）。"""
+    if not rows:
+        return
+    with st.status(f"正在获取 {len(rows)} 只基金的基金经理…", expanded=False) as mst:
+        bar = st.progress(0.0)
+        for i, r in enumerate(rows):
+            try:
+                info = get_client().basic_info(r["codes"].split()[0])
+            except FundApiError:
+                info = None
+            r["managers"] = ((info or {}).get("JJJL") or "--").replace(",", "、")
+            if r.get("nav_yi") is None:
+                try:
+                    r["nav_yi"] = float((info or {}).get("ENDNAV")) / 1e8
+                except (TypeError, ValueError):
+                    pass
+            if (i + 1) % 25 == 0 or i + 1 == len(rows):
+                bar.progress((i + 1) / len(rows), text=f"经理姓名 {i + 1}/{len(rows)}")
+        bar.empty()
+        mst.update(label="基金经理姓名已补齐", state="complete", expanded=False)
+
+
 # 点击帧的自动回点脚本（同分组页：第一帧清旧结果，iframe 延时回点按钮进第二帧）
 _KICK_SCREEN_HTML = """
 <script>
@@ -111,6 +136,11 @@ with st.sidebar:
     c_lo, c_hi = st.columns(2)
     lo = c_lo.number_input("员工持有 ≥（%）", min_value=0.0, max_value=100.0, value=2.0, step=0.1)
     hi = c_hi.number_input("且 ≤（%）", min_value=0.0, max_value=100.0, value=100.0, step=0.1)
+    s_lo, s_hi = st.columns(2)
+    nav_lo = s_lo.number_input("规模 ≥（亿）", min_value=0.0, max_value=100000.0, value=0.0, step=0.5,
+                               help="最新披露的期末净资产；0=不限。规模过滤在报告复核前执行，能直接减少需下载 PDF 的命中数")
+    nav_hi = s_hi.number_input("规模 ≤（亿）", min_value=0.0, max_value=100000.0, value=0.0, step=0.5,
+                               help="0=不限")
     buckets = st.multiselect(
         "基金类型",
         list(TYPE_BUCKETS),
@@ -182,12 +212,40 @@ if submitted and st.session_state.pop(KEY_SCREEN_PENDING, False):
         st.warning(f"初筛无命中（员工持有 ≥ {lo}%）：所选类型共 {n_uni} 只都低于下限")
         st.stop()
 
+    # 规模过滤（在报告复核前执行：直接砍掉小/超大规模基金的 PDF 下载量）。
+    # 净资产缺失（接口失败）的保留——宁多复核不漏
+    if nav_lo > 0 or nav_hi > 0:
+        with st.status(f"正在按规模 {nav_lo or 0}~{nav_hi or '不限'} 亿过滤 {len(hits)} 个命中代码…",
+                       expanded=True) as status_box:
+            bar_s = st.progress(0.0)
+            kept = []
+            for i, h in enumerate(hits):
+                try:
+                    info = get_client().basic_info(h["code"])
+                except FundApiError:
+                    info = None
+                try:
+                    h["nav_yi"] = float((info or {}).get("ENDNAV")) / 1e8
+                except (TypeError, ValueError):
+                    h["nav_yi"] = None
+                if h["nav_yi"] is None or (
+                        (nav_lo <= 0 or h["nav_yi"] >= nav_lo) and (nav_hi <= 0 or h["nav_yi"] <= nav_hi)):
+                    kept.append(h)
+                if (i + 1) % 50 == 0 or i + 1 == len(hits):
+                    bar_s.progress((i + 1) / len(hits), text=f"规模过滤 {i + 1}/{len(hits)} · 保留 {len(kept)}")
+            hits = kept
+            status_box.update(label=f"规模过滤完成：保留 {len(hits)} 个代码（净资产缺失 {sum(1 for h in hits if h['nav_yi'] is None)} 只保留）",
+                              state="complete", expanded=False)
+        if not hits:
+            st.warning(f"规模 {nav_lo or 0}~{nav_hi or '不限'} 亿区间内无命中基金")
+            st.stop()
+
     rows = []
     if fast_mode:
         rows = [{"codes": h["code"], "name": h["name"], "type": h["type"],
                  "emp_pct": float(h["internal"].replace("%", "")), "emp_shares": None,
                  "manager_range": "", "report": f"F10级别口径 {h.get('date', '')}",
-                 "art": ""} for h in hits]
+                 "art": "", "nav_yi": h.get("nav_yi")} for h in hits]
         rows = sorted(rows, key=lambda x: -x["emp_pct"])
     else:
         with st.status(f"[2/2] 正在下载 {len(hits)} 个命中代码的定期报告 PDF，按合计口径复核…",
@@ -211,6 +269,7 @@ if submitted and st.session_state.pop(KEY_SCREEN_PENDING, False):
                             "report": hold.get("report_date", "") +
                                       ("中报" if "中期" in hold.get("report_title", "") else "年报"),
                             "art": (re.search(r"(AN\d+)", hold.get("pdf_url", "")) or [None, ""])[1],
+                            "nav_yi": h.get("nav_yi"),
                         })
                 if (i + 1) % 20 == 0 or i + 1 == len(hits):
                     el = time.time() - t1
@@ -222,6 +281,7 @@ if submitted and st.session_state.pop(KEY_SCREEN_PENDING, False):
             status_box.update(label=f"[2/2] 复核完成：{len(verified)} 个代码 / {len(rows)} 只基金"
                                     f"（区间 {lo}%~{hi}%，失败 {len(failed2)}）",
                               state="complete", expanded=False)
+    _enrich_managers(rows)  # 基金经理姓名：复核路径解析时已缓存（秒出），快筛路径逐只补查
     st.session_state[KEY_SCREEN_RESULT] = {"rows": rows, "lo": lo, "hi": hi}
 
 # ---------------- 结果展示 ----------------
@@ -239,16 +299,20 @@ if result is not None:
     m3.metric("最高占比", f"{rows[0]['emp_pct']:.2f}%")
     disp = pd.DataFrame([{
         "代码": r["codes"], "名称": r["name"], "类型": r["type"],
+        "基金经理": r.get("managers") or "--",
+        "规模(亿)": f"{r['nav_yi']:,.2f}" if r.get("nav_yi") else "--",
         "员工持有%": _fmt_pct(r["emp_pct"]),
         "员工持有(万份)": f"{r['emp_shares'] / 1e4:,.2f}" if r.get("emp_shares") else "--",
         "经理持有": format_range(r.get("manager_range")) or "--",
         "报告期": r["report"],
     } for r in rows])
-    st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
+    st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致。"
+               "员工持有占比高的基金多为小规模，注意清盘风险")
     render_sortable_table(
         disp,
         sort_values={"员工持有%": [r["emp_pct"] for r in rows],
-                     "员工持有(万份)": [r.get("emp_shares") for r in rows]},
+                     "员工持有(万份)": [r.get("emp_shares") for r in rows],
+                     "规模(亿)": [r.get("nav_yi") for r in rows]},
         title=f"员工持有{_fmt_pct(lo)}-{_fmt_pct(hi)}%筛选.csv",
     )
     if caliber == "报告 PDF 合计口径":
