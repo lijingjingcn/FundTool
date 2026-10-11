@@ -46,7 +46,6 @@ from ui.state import (  # noqa: E402
     get_client,
 )
 from ui.sortable_table import sortable_table_html  # noqa: E402
-from ui.constants import TWO_LINE_HEADERS  # noqa: E402
 from fundtool.client import parse_jdzf_ranks, parse_period_returns  # noqa: E402
 
 import pandas as pd  # noqa: E402
@@ -78,26 +77,16 @@ def click_query(at):
     next(b for b in at.button if "开始查询" in b.label).click().run()
 
 
-def overview_dfs(at):
-    """只取分组总览表（以“代码”列为特征），排除详情里的任职表等。
+def overview_rows(at, gi=0):
+    """分组总览的展示行（AppTest 读不到 st.iframe 里的 HTML 排序表，从会话里的
+    KEY_PLAN/KEY_RESULTS 按渲染顺序用 display_row 重建；gi=分组序号，默认选中组）。
 
-    总览表用 st.table 渲染（文字可复制）；带高亮时传入 pandas Styler，
-    AppTest 取到的 .value 已是底层 DataFrame。两行表头的 MultiIndex 列名
-    在这里展平回 '同类排名(近1年)' 形式，方便下游断言按平铺列名访问。
-    """
-    out = []
-    for d in list(at.dataframe) + list(at.table):
-        v = d.value
-        if hasattr(v, "data"):  # pandas Styler
-            v = v.data
-        if hasattr(v, "columns"):
-            if isinstance(v.columns, pd.MultiIndex):
-                rev = {pair: flat for flat, pair in TWO_LINE_HEADERS.items()}
-                v = v.copy()
-                v.columns = [rev.get((a, b), f"{a}({b})" if a else str(b)) for a, b in v.columns]
-            if "代码" in v.columns:
-                out.append(v)
-    return out
+    「只渲染选中分组」改由经理汇总 expander 的数量断言（stateful tabs + tab.open）。"""
+    from ui.render import display_row
+    from ui.state import KEY_PLAN, KEY_RESULTS
+    results = at.session_state[KEY_RESULTS] or {}
+    codes = at.session_state[KEY_PLAN][gi][1]
+    return [display_row(results[c]) for c in codes if c in results]
 
 
 def query_groups(codes_texts):
@@ -120,17 +109,18 @@ def switch_group(at, label):
 def test_group_query_basic():
     """单分组查询：组内重复合并、无效代码报错、经理变更提示、详情含历史对比表"""
     at = query_groups([("我的基金", "005827 005827 999999")])
-    dfs = overview_dfs(at)
-    assert dfs, "总览表格未渲染"
-    df = dfs[0]
-    assert list(df["代码"]) == ["005827"], "组内重复应合并为一条"
-    row = df.iloc[0]
+    rows = overview_rows(at)
+    assert rows, "总览行未构建"
+    assert [r["代码"] for r in rows] == ["005827"], "组内重复应合并为一条"
+    row = rows[0]
     assert row["名称"] == "易方达蓝筹精选混合", row["名称"]
     assert row["基金经理持有本基金"] == ">100万份", row["基金经理持有本基金"]
     assert row["从业人员持有本基金"] == "854.48万份(0.0639%)", row["从业人员持有本基金"]
     assert any("999999" in e.value for e in at.error), [e.value for e in at.error]
-    assert "持有较上期" in df.columns, df.columns
+    assert "持有较上期" in row, row
     assert re.fullmatch(r"(↑\d+档|↓\d+档|→持平|--)", row["持有较上期"]), row["持有较上期"]
+    assert any("点击表头排序" in c.value for c in at.caption), \
+        f"总览表应带排序说明，实际 {[c.value for c in at.caption]}"
     tables = [t.value.data if hasattr(t.value, "data") else t.value for t in at.table]
     assert any("报告期" in list(v.columns) for v in tables if hasattr(v, "columns")), "详情页应有历史对比表"
     warn_texts = [w.value for w in at.warning]
@@ -145,9 +135,8 @@ def test_group_query_basic():
 def test_share_class_a_row():
     """多级别报表按查询代码的份额级别取行：010790（A类）经理 A 类 >100；
     从业人员双口径：A类 1.6262%（A类份额为分母）/ 合计 803.86万份(0.4945%)"""
-    at = query_groups([("我的基金", "010790")])
-    df = overview_dfs(at)[0]
-    row = df[df["代码"] == "010790"].iloc[0]
+    rows = overview_rows(query_groups([("我的基金", "010790")]))
+    row = next(r for r in rows if r["代码"] == "010790")
     assert row["基金经理持有本基金"] == ">100万份", f"010790 解析错误: {row['基金经理持有本基金']}"
     assert row["从业人员持有本基金"] == "A类 1.6262% / 合计 803.86万份(0.4945%)", \
         f"010790 从业人员双口径错误: {row['从业人员持有本基金']}"
@@ -155,9 +144,8 @@ def test_share_class_a_row():
 
 def test_share_class_c_not_mixed_into_a():
     """多级别报表不得把 C 类持有算到 A 类头上：015887（A类）经理 A 类 0~10、C 类 >100"""
-    at = query_groups([("我的基金", "015887")])
-    df = overview_dfs(at)[0]
-    row = df[df["代码"] == "015887"].iloc[0]
+    rows = overview_rows(query_groups([("我的基金", "015887")]))
+    row = next(r for r in rows if r["代码"] == "015887")
     assert row["基金经理持有本基金"] == "0~10万份", f"015887 解析错误: {row['基金经理持有本基金']}"
 
 
@@ -165,10 +153,9 @@ def test_two_groups_cross_dup_and_manager_drilldown():
     """两个分组各自出表（切换分组时渲染）、跨组重复提醒；点经理按钮就地展示其全部在管基金"""
     # 010790 跨两组重复；第一组经理含吴昊（海富通，id 30132788）
     at = query_groups([("我的基金", "010790"), ("分组2", "161725 010790")])
-    # stateful tabs 只渲染选中分组（默认第一组），切换时整页 rerun 只重画目标组
-    dfs = overview_dfs(at)
-    assert len(dfs) == 1, f"只应渲染选中的第一组，实际 {len(dfs)}"
-    assert list(dfs[0]["代码"]) == ["010790"], dfs[0].to_string()
+    # stateful tabs 只渲染选中分组（默认第一组）：经理汇总 expander 只此一组有
+    rows = overview_rows(at)
+    assert [r["代码"] for r in rows] == ["010790"], [r["代码"] for r in rows]
     warn_texts = [w.value for w in at.warning]
     assert any("010790" in w and "重复" in w for w in warn_texts), warn_texts
     assert sum("本组经理汇总" in e.label for e in at.expander) == 1, \
@@ -185,8 +172,8 @@ def test_two_groups_cross_dup_and_manager_drilldown():
     assert any("010790" in s.value for s in at.success), [s.value for s in at.success]
     # 切换到第二组：该组渲染（表+经理汇总），第一组不再渲染，经理视图不跨组遗留
     switch_group(at, "分组2（2只）")
-    dfs = overview_dfs(at)
-    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["161725", "010790"], dfs[0].to_string()
+    rows = overview_rows(at, 1)
+    assert [r["代码"] for r in rows] == ["161725", "010790"], [r["代码"] for r in rows]
     assert sum("本组经理汇总" in e.label for e in at.expander) == 1, [e.label for e in at.expander]
     assert not any(b.key and b.key.startswith("mvfund_") for b in at.button), \
         "第一组的经理视图（下钻）不应出现在第二组"
@@ -200,11 +187,11 @@ def test_groups_persist_across_sessions():
     assert len(at2.text_area) == 2, "分组数应从 我的基金.json 恢复"
     assert "161725" in at2.text_area[1].value, at2.text_area[1].value
     click_query(at2)
-    dfs = overview_dfs(at2)
-    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["005827"], "恢复后直接查出选中分组结果"
+    rows = overview_rows(at2)
+    assert [r["代码"] for r in rows] == ["005827"], "恢复后直接查出选中分组结果"
     switch_group(at2, "分组2（1只）")
-    dfs = overview_dfs(at2)
-    assert len(dfs) == 1 and list(dfs[0]["代码"]) == ["161725"], dfs[0].to_string()
+    rows = overview_rows(at2, 1)
+    assert [r["代码"] for r in rows] == ["161725"], [r["代码"] for r in rows]
 
 
 def test_group_reorder_persists():
@@ -246,14 +233,14 @@ def test_requery_clears_previous_results_before_query(monkeypatch):
 
     monkeypatch.setattr(query_mod, "query_all", fake_query_all)
     at = query_groups([("我的基金", "005827")])
-    dfs = overview_dfs(at)
-    assert dfs and list(dfs[0]["代码"]) == ["005827"], "首轮查询应出表"
+    rows = overview_rows(at)
+    assert rows and [r["代码"] for r in rows] == ["005827"], "首轮查询应出表"
     assert KEY_QUERY_PENDING not in at.session_state, "首轮完成后 pending 不应残留"
     assert len(captured) == 1, captured
 
     click_query(at)  # 第二次点开始查询（两段式）
-    dfs = overview_dfs(at)
-    assert dfs and list(dfs[0]["代码"]) == ["005827"], "再次查询后结果应重渲染"
+    rows = overview_rows(at)
+    assert rows and [r["代码"] for r in rows] == ["005827"], "再次查询后结果应重渲染"
     assert KEY_QUERY_PENDING not in at.session_state, "查询完成后 pending 应已消费"
     assert len(captured) == 2, captured
     assert captured[1][0] is None, "第二次查询入口时刻，上一轮结果应已被点击帧清空"
@@ -427,8 +414,8 @@ def test_parse_jdzf_ranks():
 
 def test_peer_rank_column_display_and_coloring():
     """同类排名(近1年/近3年)：'前X%'格式（向上取整、最小1）、数值排序键、
-    前25%红字/后25%绿字（Styler 与 HTML 表两套渲染路径语义一致）"""
-    from ui.render import _RET_DOWN_FG, _RET_UP_FG, _highlight_changes, _styler_col_name, display_sort_values
+    前25%红字/后25%绿字（总览表统一走 HTML 排序表渲染）"""
+    from ui.render import display_sort_values
 
     base = {"代码": "A", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "r1m": None, "r3m": None,
@@ -443,34 +430,15 @@ def test_peer_rank_column_display_and_coloring():
     assert [d["同类排名(近1年)"] for d in disp] == ["前1%", "前12%", "前50%", "前96%", "--"]
     assert [d["同类排名(近3年)"] for d in disp] == ["前12%", "前50%", "--", "前100%", "--"]
     assert [d["同类排名(近5年)"] for d in disp] == ["前50%", "--", "前100%", "前1%", "--"]
-    # 分组总览表（pandas Styler）路径
-    for cname in ("同类排名(近1年)", "同类排名(近3年)", "同类排名(近5年)"):
-        col = pd.Series([d[cname] for d in disp], name=cname)
-        if cname == "同类排名(近1年)":
-            assert _highlight_changes(col) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""]
-        elif cname == "同类排名(近3年)":
-            assert _highlight_changes(col) == [_RET_UP_FG, "", "", _RET_DOWN_FG, ""]
-        else:
-            assert _highlight_changes(col) == ["", "", _RET_DOWN_FG, _RET_UP_FG, ""]
-    # 分组总览表的 MultiIndex 两行表头：组名跨列、其余列顶层为空，高亮函数按归一列名工作
-    from ui.render import grouped_header_df
-    gdf = grouped_header_df(pd.DataFrame(disp))
-    assert ("同类排名", "近1年") in gdf.columns and ("", "代码") in gdf.columns, list(gdf.columns)
-    assert ("同类排名", "近5年") in gdf.columns, "三列排名都应归入同类排名组"
-    assert ("", "规模(净资产)") in gdf.columns, "单独的「规模(净资产)」不得被拆成两行"
-    assert ("基金经理", "持有本基金") in gdf.columns, "超长表头应拆成两行（TWO_LINE_HEADERS）"
-    assert ("从业人员", "持有本基金") in gdf.columns, "从业人员持有列也应拆成两行（TWO_LINE_HEADERS）"
-    assert _styler_col_name(gdf[("基金经理", "持有本基金")]) == "基金经理持有本基金", "归一列名应还原平铺名"
-    assert _styler_col_name(gdf[("从业人员", "持有本基金")]) == "从业人员持有本基金", "归一列名应还原平铺名"
-    assert _highlight_changes(gdf[("同类排名", "近1年")]) == [_RET_UP_FG, _RET_UP_FG, "", _RET_DOWN_FG, ""], \
-        "完整元组列名选中（Styler.apply 实际传入的形式）才能命中归一逻辑"
-    # 经理视图（HTML 排序表）路径：数值排序键 + 同样的颜色语义
+    # 总览表（HTML 排序表）路径：数值排序键 + 前25%红字/后25%绿字 + 两行分组表头
     h = sortable_table_html(pd.DataFrame(disp), sort_values=display_sort_values(rows))
     assert '<td class="ret-up" data-sort="12.0"' in h, h
     assert '<td class="ret-down" data-sort="95.53"' in h, h
     assert '<td class="" data-sort="50.0"' in h, h
     assert '<td class="ret-up" data-sort="12.0"' in h and 'data-sort="99.9"' in h, h
     assert '<td class="" data-sort=""' in h, "未满期不着色且排序沉底"
+    assert '<th class="grp" colspan="3">同类排名</th>' in h, "三列排名应合并两行分组表头"
+    assert "基金经理<br>持有本基金" in h, "超长表头应折成两行显示（TWO_LINE_HEADERS）"
 
 
 def test_pct_format():
@@ -595,28 +563,41 @@ def test_group_manager_agg_same_name_and_fallback():
 
 
 def test_sortable_table_explicit_sort_keys_and_highlights():
-    """可排序表格：显式数值排序键 + 迷你基金/经理变更高亮 + 悬停不覆盖高亮"""
+    """可排序表格：显式数值排序键 + 迷你基金/经理变更/重复行高亮 + 悬停不覆盖高亮；
+    代码/名称列的字符串排序键（名称为拼音键）写入 data-sort，非数值键按 data-sort 文本比较"""
     raw = fund_overview_row("005827", with_holding=True)
     fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
                 "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
                 "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
                 "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
-    from ui.render import display_sort_values
+    from ui.render import display_sort_values, pinyin_key
     df = pd.DataFrame([display_row(raw), display_row(fake_raw)])
+    sv = display_sort_values([raw, fake_raw])
     h = sortable_table_html(df, small_codes={"999999"}, mgr_change_codes={"005827"},
-                            sort_values=display_sort_values([raw, fake_raw]))
+                            sort_values=sv, dup_codes={"999999"})
     assert f'data-sort="{raw["nav_yuan"]}"' in h, "规模排序键应来自原始 nav_yuan（全精度数值）"
     assert f'data-sort="{0.3e8}"' in h, "迷你基金规模键应为 0.3e8"
     assert 'data-sort="4"' in h, "持有>100万份应为档位键 4"
     assert 'data-sort="-28.73"' in h and 'data-sort="1.5"' in h, "阶段涨幅列应为数值排序键"
-    assert '<td class="ret-down" data-sort="-28.73"' in h, "负收益应红字"
-    assert '<td class="ret-up" data-sort="1.5"' in h, "正收益应绿字"
+    assert '<td class="ret-down dup" data-sort="-28.73"' in h, "负收益应红字（重复行叠加 dup）"
+    assert '<td class="ret-up dup" data-sort="1.5"' in h, "正收益应绿字（重复行叠加 dup）"
     assert "td.ret-up { color: #E53935; }" in h and "td.ret-down { color: #3FB950; }" in h, \
         "阶段涨幅文字色样式（正收益红/负收益绿，含深色主题）应存在"
-    assert '<td class="" data-sort=""' in h, "未满期（--）不着色且排序沉底"
+    assert '<td class="dup" data-sort=""' in h, "未满期（--）不着色且排序沉底（重复行只带 dup 底色）"
     assert 'data-sort="-2"' in h, "降2档应为数值键 -2"
-    assert 'td class="small"' in h, "迷你基金规模单元格应标红"
-    assert 'td class="mgrchg"' in h, "经理变更的基金经理单元格应标琥珀色"
+    assert 'td class="small dup"' in h, "重复行的迷你基金规模单元格应叠加 small+dup（提示色获胜）"
+    assert 'class="dup" data-sort="999999"' in h, h
+    assert h.count('dup"') == len(df.columns), "重复行每个单元格都应标 dup"
+    assert 'td class="mgrchg"' in h, "经理变更的基金经理单元格应标琥珀色（非重复行不受 dup 影响）"
+    assert h.index("td.dup {") < h.index("td.small {"), "dup 底色规则应在 small 之前（同格叠加时提示色获胜）"
+    # 代码/名称列的排序键：代码按数字（parseFloat 解析前导零）、名称按拼音字符串
+    assert sv["代码"] == ["005827", "999999"] and 'data-sort="005827"' in h, h
+    assert sv["名称"] == [pinyin_key("易方达蓝筹精选混合"), "ce shi"], sv["名称"]
+    assert f'data-sort="{pinyin_key("易方达蓝筹精选混合")}"' in h, "名称列应写拼音排序键"
+    # 非数值键的 JS 回退须比较 data-sort（拼音键才能生效），而不是单元格显示文本
+    assert "const sa = a.cells[idx].dataset.sort" in h and "localeCompare(sb, 'zh')" in h, h
+    assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg):not(.dup)" in h, \
+        "行悬停底色不得覆盖红/绿/琥珀高亮单元格（含 dup）"
     assert h.count("<tr>") == 4, "两行表头（同类排名分组）+ 2 数据行"
     # 两行分组表头：组名合并跨列、子项在第二行、其余列贯穿；排序/导出只用叶子列
     assert '<th class="grp" colspan="3">同类排名</th>' in h, h
@@ -626,8 +607,31 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
         "data-col 保留完整列名，CSV 导出表头不变"
     assert "基金经理<br>持有本基金<span class=\"arr\">" in h, "超长表头应折成两行显示"
     assert 'data-col="规模(净资产)"' in h and "sortTable" in h and "exportCSV" in h
-    assert "tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg)" in h and "tr:hover td {" not in h, \
-        "行悬停底色不得覆盖红/绿/琥珀高亮单元格"
+
+
+def test_pinyin_key_and_name_sort():
+    """名称拼音排序键：音节空格分隔、小写，非汉字片段（英文/数字/括号）原样保留小写；
+    代码/名称键进入 display_sort_values（总览表「名称」点表头按拼音、「代码」按数字）"""
+    from ui.render import display_sort_values, pinyin_key
+    assert pinyin_key("易方达蓝筹精选混合") == "yi fang da lan chou jing xuan hun he"
+    assert pinyin_key("招商中证白酒指数(LOF)A").startswith("zhao shang zhong zheng bai jiu zhi shu"), \
+        pinyin_key("招商中证白酒指数(LOF)A")
+    assert "LOF" not in pinyin_key("招商中证白酒指数(LOF)A"), "英文片段应小写"
+    assert pinyin_key(None) == "" and pinyin_key(123) == "123"
+    rows = [{"代码": "161725", "名称": "招商中证白酒指数(LOF)A"},
+            {"代码": "005827", "名称": "易方达蓝筹精选混合"}]
+    sv = display_sort_values(rows)
+    assert sv["代码"] == ["161725", "005827"], sv["代码"]
+    assert sv["名称"] == [pinyin_key("招商中证白酒指数(LOF)A"), pinyin_key("易方达蓝筹精选混合")]
+    # 经理汇总表也按拼音排基金经理/公司
+    from ui.render import _summary_sort_values
+    items = [{"mgr": {"name": "张坤", "company": "易方达", "codes": [], "scale": "--", "days": "--",
+                      "best_return": "--"}, "funds": []},
+             {"mgr": {"name": "吴昊", "company": "海富通", "codes": [], "scale": "--", "days": "--",
+                      "best_return": "--"}, "funds": []}]
+    ssv = _summary_sort_values(items)
+    assert ssv["基金经理"] == ["zhang kun", "wu hao"], ssv["基金经理"]
+    assert ssv["公司"] == ["yi fang da", "hai fu tong"], ssv["公司"]
 
 
 # ---------------- 宏观指标页 ----------------

@@ -10,6 +10,7 @@ import re
 
 import pandas as pd
 import streamlit as st
+from pypinyin import lazy_pinyin
 
 from fundtool import (
     FundApiError,
@@ -18,7 +19,7 @@ from fundtool import (
     get_manager_holding_history,
     range_rank,
 )
-from ui.constants import HISTORY_N, SMALL_NAV_YUAN, TWO_LINE_HEADERS
+from ui.constants import HISTORY_N, SMALL_NAV_YUAN
 from ui.query import (
     emp_nums,
     fund_overview_row,
@@ -113,6 +114,13 @@ def fmt_employee_holding_pair(cls_letter, cls_pct, tot_shares, tot_pct):
     return f"{cls_letter}类 {_trim_pct(cls_pct)}% / 合计 {fmt_employee_holding(tot_shares, tot_pct)}"
 
 
+def pinyin_key(name):
+    """名称 -> 拼音排序键（小写、音节空格分隔；非汉字片段原样保留）。
+    浏览器 localeCompare 的中文排序各内核不一，显式拼音键保证「名称」列
+    点表头在任何浏览器下都按拼音排序。多音字取常用读音。"""
+    return " ".join(lazy_pinyin(str(name or ""))).lower()
+
+
 def display_row(row):
     """原始行 -> 总览表展示行（列名即表头）。格式化集中在此，别处不得拼展示文案。"""
     scale = yi(row.get("nav_yuan"))
@@ -147,8 +155,11 @@ def display_row(row):
 
 
 def display_sort_values(rows):
-    """原始行列表 -> sortable_table 的数值排序键（规模按元数、收益/持有按数值、变化按升降档）"""
+    """原始行列表 -> sortable_table 的排序键（规模按元数、收益/持有按数值、变化按升降档；
+    代码按数字（6 位代码下与字典序一致）、名称按拼音——字符串键由组件按 localeCompare 比较）"""
     return {
+        "代码": [str(r.get("代码") or "") for r in rows],
+        "名称": [pinyin_key(r.get("名称")) for r in rows],
         "规模(净资产)": [r.get("nav_yuan") for r in rows],
         "近1月": [r.get("r1m") for r in rows],
         "近3月": [r.get("r3m") for r in rows],
@@ -352,119 +363,24 @@ def render_manager_funds(m, page=""):
         render_fund_detail_section(st.session_state[KEY_SINGLE_CODE])
 
 
-# 「组名(子项)」列名（如 同类排名(近1年)）；连续≥2列同组才合并，单独的「规模(净资产)」不算
-_GROUPED_COL = re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
-
-
-def grouped_header_df(df):
-    """平铺列名的展示表 -> 两行表头（MultiIndex）：相邻≥2列同名「组(子项)」时，
-    第一行为组名（跨列合并）、第二行为子项；其余列第一行为空。
-    TWO_LINE_HEADERS 里的超长列名也拆成上行/下行两行。CSV 导出仍用平铺 df。"""
-    cols = list(df.columns)
-    tops = [""] * len(cols)
-    i = 0
-    while i < len(cols):
-        m = _GROUPED_COL.match(str(cols[i]))
-        if m:
-            j = i
-            while j < len(cols) and (mj := _GROUPED_COL.match(str(cols[j]))) and mj.group("grp") == m.group("grp"):
-                j += 1
-            if j - i >= 2:
-                for k in range(i, j):
-                    tops[k] = m.group("grp")
-                i = j
-                continue
-        i += 1
-    subs = []
-    for c, t in zip(cols, tops):
-        if t:
-            subs.append(_GROUPED_COL.match(str(c)).group("sub"))
-        elif str(c) in TWO_LINE_HEADERS:
-            subs.append(TWO_LINE_HEADERS[str(c)][1])
-        else:
-            subs.append(str(c))
-    tops = [TWO_LINE_HEADERS[str(c)][0] if not t and str(c) in TWO_LINE_HEADERS else t
-            for c, t in zip(cols, tops)]
-    out = df.copy()
-    out.columns = pd.MultiIndex.from_arrays([tops, subs])
-    return out
-
-
-def _styler_col_name(col):
-    """Styler 列名归一：MultiIndex ('同类排名','近1年') -> '同类排名(近1年)'、
-    ('','代码') -> '代码'；普通单级列名原样返回。让高亮函数对两套表头通用。"""
-    n = col.name
-    if isinstance(n, tuple) and len(n) == 2:
-        for flat, (a, b) in TWO_LINE_HEADERS.items():
-            if n == (a, b):
-                return flat
-        top, sub = (str(x) for x in n)
-        return f"{top}({sub})" if top else sub
-    return str(n)
-
-
-# ---------------- 总览表高亮 ----------------
-# 跨分组重复行的底色（半透明琥珀色，深浅主题下都可读）
-_DUP_BG = "background-color: rgba(255,170,0,0.32)"
-# 迷你基金（净资产<0.5亿）规模单元格的底色（半透明红色）
-_SMALL_BG = "background-color: rgba(229,57,53,0.45)"
+# ---------------- 详情表高亮（Styler，用于详情 expander 内的小表） ----------------
 # 经理持有份额变化：升档绿色 / 降档红色（单元格底色）
 _CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
 _CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
-# 阶段涨幅（近1月/3月/6月/今年/1年/2年/3年/5年）：正收益红字 / 负收益绿字
+# 阶段涨幅（近1月/3月/6月/今年/1年/2年/3月/5年）：正收益红字 / 负收益绿字
 # （A 股习惯红涨绿跌；注意与持有较上期的绿=增持红=减持是两套语义）
 _RET_UP_FG = "color: #E53935"
 _RET_DOWN_FG = "color: #2EA043"
-# 近一年基金经理变更：基金经理单元格琥珀色
-_MGRCHG_BG = "background-color: rgba(255,170,0,0.45)"
-
-
-def _highlight_mgr_change(changed_codes, codes):
-    """基金经理列按行高亮：近一年经理有变更的行，基金经理单元格上底色"""
-
-    def _hl(col):
-        if _styler_col_name(col) != "基金经理":
-            return [""] * len(col)
-        return [_MGRCHG_BG if c in changed_codes else "" for c in codes]
-
-    return _hl
-
-
-def _highlight_dup_rows(dup_codes):
-    def _hl(row):
-        # 代码 恒为展示表第一列；MultiIndex 表头下行标签是 ('','代码') 元组，按位置取更稳
-        return [_DUP_BG if row.iloc[0] in dup_codes else ""] * len(row)
-
-    return _hl
-
-
-def _highlight_small_scale(small_codes, codes):
-    """规模列按行高亮：只给迷你基金所在行的「规模(净资产)」单元格上底色"""
-
-    def _hl(col):
-        if _styler_col_name(col) != "规模(净资产)":
-            return [""] * len(col)
-        return [_SMALL_BG if c in small_codes else "" for c in codes]
-
-    return _hl
 
 
 def _highlight_changes(col):
-    """涨跌单元格着色（按列）：「持有较上期/较上期」↑绿底 ↓红底；
+    """涨跌单元格着色（按列，详情 expander 内的 Styler 小表用）：「持有较上期/较上期」↑绿底 ↓红底；
     阶段涨幅列（近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年）正红字 负绿字（A 股红涨绿跌）；
-    同类排名(近X年) 各期 前25%红字、后25%绿字（小=好，红=好）；
-    其他列与 --（未满期/无数据）不着色"""
-    name = _styler_col_name(col)
+    其他列与 --（未满期/无数据）不着色。总览大表的同类着色在 sortable_table 组件内实现。"""
+    name = str(col.name)
     if name in ("持有较上期", "较上期"):
         def bg(v):
             return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
-    elif name.startswith("同类排名("):
-        def bg(v):
-            m = re.fullmatch(r"前(\d+)%", str(v))
-            if not m:
-                return ""
-            p = int(m.group(1))
-            return _RET_UP_FG if p <= 25 else _RET_DOWN_FG if p > 75 else ""
     elif name in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
         def bg(v):
             if v in ("--", ""):
@@ -503,6 +419,8 @@ def _summary_sort_values(items):
         return float(m.group()) if m else None
 
     return {
+        "基金经理": [pinyin_key(it["mgr"].get("name")) for it in items],
+        "公司": [pinyin_key(it["mgr"].get("company")) for it in items],
         "本组持有": [float(len(it["funds"])) for it in items],
         "现任基金": [float(len(it["mgr"].get("codes") or [])) for it in items],
         "在管总规模": [_num(it["mgr"].get("scale")) for it in items],
@@ -570,24 +488,18 @@ def render_group(name, codes, results):
     raw_rows = [results[c] for c in codes if c in results]
     if raw_rows:
         disp = pd.DataFrame([display_row(r) for r in raw_rows])
-        codes_ordered = [r["代码"] for r in raw_rows]
         small_here = {r["代码"] for r in raw_rows if r.get("small")}
         mgrchg_here = {r["代码"] for r in raw_rows if r.get("mgr_chg")}
-        # 用静态 HTML 表格渲染（st.dataframe 是画布渲染，文字无法鼠标划选复制）。
-        # 表头两行分组（同类排名 跨 近1年/近3年）：展示用 MultiIndex df，CSV 导出仍用平铺列名
-        styler = grouped_header_df(disp).style.apply(_highlight_dup_rows(highlight), axis=1)
-        if small_here:
-            styler = styler.apply(_highlight_small_scale(small_here, codes_ordered), axis=0)
-        if mgrchg_here:
-            styler = styler.apply(_highlight_mgr_change(mgrchg_here, codes_ordered), axis=0)
-        styler = styler.apply(_highlight_changes, axis=0)
-        st.table(styler.hide(axis="index"))
-        st.download_button(
-            "⬇️ 导出本组 CSV",
-            disp.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"基金信息-{name}.csv",
-            mime="text/csv",
-            key=f"csv_{name}",
+        # 可点表头排序的 HTML 表格（与经理视图/筛选页同款组件）：数值列按原始值排，
+        # 「代码」按数字、「名称」按拼音；重复行整行琥珀色。导出 CSV 随当前显示顺序
+        st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；「名称」按拼音、「代码」按代码数字；导出的 CSV 与当前显示顺序一致")
+        render_sortable_table(
+            disp,
+            small_codes=small_here,
+            mgr_change_codes=mgrchg_here,
+            dup_codes=highlight,
+            sort_values=display_sort_values(raw_rows),
+            title=f"基金信息-{name}.csv",
         )
         mgr_dir = manager_dir_snapshot()
         if mgr_dir is None:

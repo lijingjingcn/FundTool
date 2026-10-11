@@ -5,8 +5,8 @@
 且排序按字符串比较（"10亿"会排在"200亿"前面）；st.table 则不支持排序。
 内嵌 HTML + 少量原生 JS 可以两者兼得：
 - 点表头排序 / 再点切换升降序，浏览器本地完成、即时响应；
-- 排序键由调用方通过 sort_values 显式给出（从原始数据算数值，见 render.display_sort_values），
-  未提供键的列退回单元格文本比较，""（无效值）恒沉底；
+- 排序键由调用方通过 sort_values 显式给出（从原始数据算数值，见 render.display_sort_values；
+  也支持字符串键，如「名称」列的拼音键），未提供键的列退回单元格文本比较，""（无效值）恒沉底；
 - 单元格底色高亮、文字可划选复制、随当前显示顺序导出 CSV。
 """
 import html as _html
@@ -39,12 +39,14 @@ th .arr { display: inline-block; width: 1.1em; color: #5a6b81; font-weight: 400;
 /* 分组表头（同类排名 跨 近1年/近3年 两列）：不可点、居中 */
 th.grp { cursor: default; text-align: center; }
 td { padding: 6px 9px; white-space: nowrap; border-bottom: 1px solid #e6e9ee; color: #26313f; }
+/* 重复行琥珀底在前，同格叠加 small/up/down/mgrchg 时让更具体的提示色获胜 */
+td.dup { background: rgba(255,170,0,0.32); }
 td.small { background: __SMALL__; } td.up { background: __UP__; } td.down { background: __DOWN__; }
 td.mgrchg { background: rgba(255,170,0,0.45); }
 /* 阶段涨幅：正收益红字 / 负收益绿字（A 股习惯红涨绿跌，文字色而非底色） */
 td.ret-up { color: #E53935; } td.ret-down { color: #2EA043; }
 /* 行悬停底色不覆盖高亮单元格（红/绿/琥珀提示悬停时保持可见） */
-tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg) { background: rgba(120,140,170,0.10); }
+tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg):not(.dup) { background: rgba(120,140,170,0.10); }
 @media (prefers-color-scheme: dark) {
   th { background: #212b3b; color: #dbe3ee; border-bottom-color: #364257; }
   th[data-col]:hover { background: #2a3648; }
@@ -66,14 +68,16 @@ function sortTable(th) {
   th.setAttribute('aria-sort', asc ? 'ascending' : 'descending');
   th.querySelector('.arr').textContent = asc ? '↑' : '↓';
   const key = r => parseFloat(r.cells[idx].dataset.sort);
-  const txt = r => r.cells[idx].textContent.trim();
   const rows = Array.from(table.tBodies[0].rows);
   const valid = rows.filter(r => r.cells[idx].dataset.sort !== '');
   const empty = rows.filter(r => r.cells[idx].dataset.sort === '');
   valid.sort((a, b) => {
     const ka = key(a), kb = key(b);
     if (!isNaN(ka) && !isNaN(kb)) return asc ? ka - kb : kb - ka;
-    return asc ? txt(a).localeCompare(txt(b), 'zh') : txt(b).localeCompare(txt(a), 'zh');
+    // 非数值键（如「名称」的拼音键、无显式键列的单元格文本）按 data-sort 文本比较：
+    // data-sort 优先于单元格文本，调用方给出的字符串排序键（拼音）才能生效
+    const sa = a.cells[idx].dataset.sort, sb = b.cells[idx].dataset.sort;
+    return asc ? sa.localeCompare(sb, 'zh') : sb.localeCompare(sa, 'zh');
   });
   [...valid, ...empty].forEach(r => table.tBodies[0].appendChild(r));
 }
@@ -150,14 +154,17 @@ def _grouped_thead_html(cols):
 
 
 def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
-                        sort_values=None, title="fund_table.csv") -> str:
+                        sort_values=None, title="fund_table.csv", dup_codes=None) -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
     small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
     mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色；
-    sort_values：{列名: [排序键…]}，长度须与 df 行数一致，键为数字或 None（沉底）；
-    未提供键的列按单元格文本排序。含「组(子项)」相邻同组列时表头自动两行分组。"""
+    dup_codes：跨分组/组内重复的代码集合，其行内所有单元格标琥珀色底（与单元格级
+    提示色叠加时提示色获胜）；sort_values：{列名: [排序键…]}，长度须与 df 行数一致，
+    键为数字或字符串（如「名称」的拼音键）或 None（沉底），未提供键的列按单元格文本排序。
+    含「组(子项)」相邻同组列时表头自动两行分组。"""
     small_codes = set(small_codes or ())
     mgr_change_codes = set(mgr_change_codes or ())
+    dup_codes = set(dup_codes or ())
     sort_values = sort_values or {}
     cols = list(df.columns)
     thead = _grouped_thead_html(cols)
@@ -185,6 +192,8 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
             elif c in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
                 # 阶段涨幅：正绿字负红字（文字色），--（未满期/无数据）不着色
                 cls = "ret-down" if val.startswith("-") and val != "--" else "ret-up" if val not in ("--", "") else ""
+            if str(row.get("代码")) in dup_codes:
+                cls = f"{cls} dup".strip()
             tds.append(f'<td class="{cls}" data-sort="{data_sort}">{_html.escape(val)}</td>')
         trs.append("<tr>" + "".join(tds) + "</tr>")
     return (
@@ -198,8 +207,8 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
 
 
 def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
-                          sort_values=None, title="fund_table.csv"):
+                          sort_values=None, title="fund_table.csv", dup_codes=None):
     """在 Streamlit 页面上渲染可点表头排序的表格"""
     n = len(df)
     height = min(120 + 36 * n, 700)
-    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title), height=height)
+    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title, dup_codes), height=height)
