@@ -72,6 +72,66 @@ def parse_period_returns(datas):
 _JDZF_TITLES = {"近1月": "r1m", "近3月": "r3m", "近6月": "r6m", "今年来": "rytd",
                 "近1年": "r1y", "近2年": "r2y", "近3年": "r3y", "近5年": "r5y"}
 
+# F10 费率页（jjfl_*.html）运作费表的两种版式：常规横排 <td class="th w110">管理费率</td><td class="w135">1.20%（每年）</td>；
+# 浮动费率竖排 <td class="yzfth w110">管理费率</td><td class="yzfcont"...><pre>多档文本</pre></td>
+_FEE_TD = r'</td><td class="(?:w135|yzfcont[^"]*)"[^>]*>(.*?)</td>'
+
+
+def _fee_text(v):
+    """费率单元格 HTML -> 干净原文（去标签、换行压成空格）"""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", v or "")).strip()
+
+
+def _fee_pct(text):
+    """费率原文 -> (数值|None, 是否多档浮动)：取文本中最高档百分比（如浮动管理费
+    '高于基准:1.60%;等于:1.20%;低于:0.80%' -> 1.60）；无百分比（'---'）-> (None, False)"""
+    vals = {float(n) for n in re.findall(r"(\d+(?:\.\d+)?)\s*%", text or "")}
+    if not vals:
+        return None, False
+    return max(vals), len(vals) > 1
+
+
+def parse_fee_page(text):
+    """F10 费率页 HTML -> {mng/cust/sales: 数值|None, *_text: 原文, total, floating,
+    buy_orig/buy_disc: 申购费首档原价/天天折扣, redeem: [[持有期限, 费率]…]}。
+    total = 三项运作费之和（%/年，缺项按 0，全缺为 None）；任一项多档浮动记 floating。
+    申购费取「小于100万元」首档（普通投资者适用档），strike 删除线为原价、竖线后为天天优惠价。
+    纯函数，便于离线测试。"""
+    out = {"mng_text": "", "cust_text": "", "sales_text": "",
+           "mng": None, "cust": None, "sales": None,
+           "total": None, "floating": False, "buy_orig": "", "buy_disc": "", "redeem": []}
+    for label, key in (("管理费率", "mng"), ("托管费率", "cust"), ("销售服务费率", "sales")):
+        m = re.search(label + _FEE_TD, text or "", re.S)
+        if not m:
+            continue
+        raw = _fee_text(m.group(1))
+        out[key + "_text"] = raw
+        out[key], floating = _fee_pct(raw)
+        out["floating"] = out["floating"] or floating
+    vals = [out[k] for k in ("mng", "cust", "sales")]
+    if any(v is not None for v in vals):
+        out["total"] = round(sum(v for v in vals if v is not None), 2)
+    # 申购费率表（与「认购费率」同结构，按 <label>锚定区分）：首行原价（strike 删除线）| 天天折扣价
+    m = re.search(r'<label class="left">申购费率.*?<tbody>(.*?)</tbody>', text or "", re.S)
+    if m:
+        row1 = re.search(r"<tr>(.*?)</tr>", m.group(1), re.S)
+        if row1:
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row1.group(1), re.S)
+            if len(cells) >= 2:
+                sm = re.search(r"<strike[^>]*>(.*?)</strike>(?:&nbsp;)*\|(?:&nbsp;)*(.*?)$", cells[1], re.S)
+                if sm:
+                    out["buy_orig"], out["buy_disc"] = _fee_text(sm.group(1)), _fee_text(sm.group(2))
+                else:  # C 类 0.00%、固定每笔费用等无删除线版式
+                    out["buy_orig"] = _fee_text(cells[1])
+    # 赎回费梯度表：适用期限 / 赎回费率
+    m = re.search(r'<label class="left">赎回费率.*?<tbody>(.*?)</tbody>', text or "", re.S)
+    if m:
+        for tr in re.findall(r"<tr>(.*?)</tr>", m.group(1), re.S):
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)
+            if len(cells) >= 2:
+                out["redeem"].append([_fee_text(cells[0]), _fee_text(cells[1])])
+    return out
+
 
 def parse_jdzf_ranks(text):
     """F10 阶段涨幅页 HTML -> {各期: 同类排名百分位 float|None}（0=最好，100=最差）。
@@ -187,6 +247,18 @@ class EastFundClient:
         )
         out = parse_jdzf_ranks(r.text)
         self.cache.set("peerrank_v1", code, out)
+        return out
+
+    def fee_info(self, code):
+        """F10 费率页（jjfl_*.html）：管理/托管/销售服务费率（原文+数值+合计）、
+        申购费首档（原价/天天折扣）、赎回费梯度，字段见 parse_fee_page。
+        费率极少变动，缓存 30 天。附加信息，调用方失败不致命。"""
+        cached = self.cache.get("fees_v1", code, ttl=30 * 86400)
+        if cached is not None:
+            return cached
+        r = self._get(f"https://fundf10.eastmoney.com/jjfl_{code}.html")
+        out = parse_fee_page(r.text)
+        self.cache.set("fees_v1", code, out)
         return out
 
     def search_funds(self, keyword):

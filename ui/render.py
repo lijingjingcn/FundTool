@@ -87,6 +87,22 @@ def peer_pct(value):
         return "--"
 
 
+def fmt_fee_pct(value, floating=False):
+    """年费用率原始值 -> '1.40'（%/年，浮费型取上限档加 *）；None -> '--'（未披露/获取失败）"""
+    if value is None:
+        return "--"
+    return f"{value:.2f}{'*' if floating else ''}"
+
+
+def fmt_buy_fee(fee):
+    """F10 费率 -> 申购费首档文案：'1.50% → 天天基金 0.15%'（无折扣档只显原价；无表 '--'）"""
+    orig = (fee or {}).get("buy_orig") or ""
+    if not orig:
+        return "--"
+    disc = (fee or {}).get("buy_disc") or ""
+    return f"{orig} → 天天基金 {disc}" if disc else orig
+
+
 def _trim_pct(pct_val):
     """占比数值 -> 最多 4 位小数去尾零的字符串（8.335325 -> '8.3353'）"""
     return f"{pct_val:.4f}".rstrip("0").rstrip(".")
@@ -132,6 +148,7 @@ def display_row(row):
         "类型": row["类型"],
         "基金经理": row["基金经理"],
         "规模(净资产)": scale,
+        "年费用率%": fmt_fee_pct(row.get("fee_total"), row.get("fee_floating")),
         "规模日期": row["规模日期"],
         "净值日期": row["净值日期"],
         "近1月": pct(row.get("r1m")),
@@ -161,6 +178,7 @@ def display_sort_values(rows):
         "代码": [str(r.get("代码") or "") for r in rows],
         "名称": [pinyin_key(r.get("名称")) for r in rows],
         "规模(净资产)": [r.get("nav_yuan") for r in rows],
+        "年费用率%": [r.get("fee_total") for r in rows],
         "近1月": [r.get("r1m") for r in rows],
         "近3月": [r.get("r3m") for r in rows],
         "近6月": [r.get("r6m") for r in rows],
@@ -233,6 +251,34 @@ def render_fund_detail(code, with_holding=None):
         f"- **最大回撤(近1年)**：{info.get('MAXRETRA1', '--')}%\n"
         f"- [查看基金档案 ↗](https://fundf10.eastmoney.com/{code}.html)"
     )
+    st.markdown("**基金费率**")
+    try:
+        fee = get_client().fee_info(code)
+    except FundApiError:
+        fee = None
+    if fee is None:
+        st.caption("费率信息获取失败（网络恢复后重开本页即可）")
+    elif not (fee.get("mng_text") or fee.get("cust_text") or fee.get("redeem")):
+        st.caption("该基金未披露费率信息")
+    else:
+        f_left, f_right = st.columns(2)
+        f_left.write(
+            f"- **管理费率**：{fee.get('mng_text') or '--'}\n"
+            f"- **托管费率**：{fee.get('cust_text') or '--'}\n"
+            f"- **销售服务费率**：{fee.get('sales_text') or '--'}\n"
+            f"- **年费用率合计**：{fmt_fee_pct(fee.get('total'), fee.get('floating'))}%/年"
+            + ("（浮动费率，展示为上限档）" if fee.get("floating") else "")
+            + "\n"
+            f"- **申购费率(首档)**：{fmt_buy_fee(fee)}"
+        )
+        if fee.get("redeem"):
+            f_right.table(pd.DataFrame(fee["redeem"], columns=["持有期限", "赎回费率"]).style.hide(axis="index"))
+        else:
+            f_right.write("赎回费率：未披露（或无赎回费）")
+        st.caption(
+            "运作费（管理/托管/销售服务）每日从基金资产计提、净值已扣除，无需另行支付；"
+            "申购费为「小于100万元」首档（天天基金优惠价）；赎回费按持有期限递减、先进先出"
+        )
     if with_holding:
         st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
         hold = get_manager_holding(get_client(), code)
@@ -327,6 +373,7 @@ def render_manager_funds(m, page=""):
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
+                       "fee_total": None, "fee_floating": False,
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
                        "r2y": None, "rytd": None, "r3y": None, "r5y": None,
                        "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
@@ -493,6 +540,7 @@ def render_group(name, codes, results):
         # 可点表头排序的 HTML 表格（与经理视图/筛选页同款组件）：数值列按原始值排，
         # 「代码」按数字、「名称」按拼音；重复行整行琥珀色。导出 CSV 随当前显示顺序
         st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；「名称」按拼音、「代码」按代码数字；导出的 CSV 与当前显示顺序一致")
+        st.caption("💰 「年费用率%」= 管理+托管+销售服务费（%/年），浮费型取上限档带 *，偏高琥珀底提示；各档原文见基金详情")
         render_sortable_table(
             disp,
             small_codes=small_here,

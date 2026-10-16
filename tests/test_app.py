@@ -35,7 +35,7 @@ from ui.query import (  # noqa: E402
     group_manager_agg,
     mgr_change_label,
 )
-from ui.render import display_row, fmt_employee_holding, manager_summary_rows, peer_pct, pct  # noqa: E402
+from ui.render import display_row, fmt_fee_pct, fmt_employee_holding, manager_summary_rows, peer_pct, pct  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_MANAGER,
     KEY_DETAIL_PAGE,
@@ -441,6 +441,55 @@ def test_peer_rank_column_display_and_coloring():
     assert "基金经理<br>持有本基金" in h, "超长表头应折成两行显示（TWO_LINE_HEADERS）"
 
 
+def test_parse_fee_page():
+    """F10 费率页解析：常规横排（007016）与浮动费率竖排（166020）两种版式的真实页面快照"""
+    from fundtool.client import parse_fee_page
+    t = open(os.path.join(ROOT, "tests", "fixtures", "fees", "jjfl_007016.html"), encoding="utf-8").read()
+    fee = parse_fee_page(t)
+    assert fee["mng_text"] == "1.20%（每年）" and fee["mng"] == 1.2, fee
+    assert fee["cust_text"] == "0.20%（每年）" and fee["cust"] == 0.2, fee
+    assert fee["sales_text"] == "---" and fee["sales"] is None, fee  # A 类无销售服务费
+    assert fee["total"] == 1.4 and fee["floating"] is False, fee
+    assert fee["buy_orig"] == "1.50%" and fee["buy_disc"] == "0.15%", fee  # 申购首档原价/天天折扣
+    assert fee["redeem"][0] == ["小于7天", "1.50%"], fee
+    assert fee["redeem"][-1] == ["大于等于730天", "0.00%"], fee
+    t2 = open(os.path.join(ROOT, "tests", "fixtures", "fees", "jjfl_166020.html"), encoding="utf-8").read()
+    f2 = parse_fee_page(t2)
+    assert f2["mng"] == 1.6 and f2["floating"] is True, f2  # 业绩挂钩浮动管理费取上限档
+    assert "1.60%" in f2["mng_text"] and "0.80%" in f2["mng_text"], f2  # 原文保留各档条款
+    assert f2["cust"] == 0.2 and f2["sales"] is None and f2["total"] == 1.8, f2
+    empty = parse_fee_page("<html><body>无费率表</body></html>")
+    assert empty["total"] is None and empty["redeem"] == [] and empty["buy_orig"] == "", empty
+
+
+def test_fmt_fee_pct_and_buy_fee():
+    """年费用率/申购费格式化：两位小数、浮费上限档带 *、None -> '--'；申购费带天天折扣档"""
+    from ui.render import fmt_buy_fee, fmt_fee_pct
+    assert fmt_fee_pct(1.4) == "1.40" and fmt_fee_pct(0.6) == "0.60"
+    assert fmt_fee_pct(1.8, True) == "1.80*"
+    assert fmt_fee_pct(None) == "--"
+    assert fmt_buy_fee({"buy_orig": "1.50%", "buy_disc": "0.15%"}) == "1.50% → 天天基金 0.15%"
+    assert fmt_buy_fee({"buy_orig": "0.00%", "buy_disc": ""}) == "0.00%"  # C 类等无折扣档
+    assert fmt_buy_fee({}) == "--"
+
+
+def test_sortable_table_fee_highlight():
+    """年费用率列：偏高（>1.5%/年）琥珀底提示（按数值排序键判定，浮费带 * 不影响）、-- 不着色"""
+    from ui.render import display_row, display_sort_values
+    base = {"代码": "007016", "名称": "测试A", "类型": "--", "基金经理": "--", "规模日期": "--",
+            "净值日期": "--", "nav_yuan": None, "small": False, "holding": "",
+            "fee_total": 1.4, "fee_floating": False}
+    high = dict(base, 代码="000002", 名称="测试C", fee_total=1.8, fee_floating=True)
+    miss = dict(base, 代码="000003", 名称="测试D", fee_total=None)
+    rows = [base, high, miss]
+    h = sortable_table_html(pd.DataFrame([display_row(r) for r in rows]),
+                            sort_values=display_sort_values(rows))
+    assert '<td class="feehigh" data-sort="1.8">1.80*</td>' in h, h
+    assert '<td class="" data-sort="1.4">1.40</td>' in h, "常规费率（1.4）不标提示色"
+    assert '<td class="" data-sort="">--</td>' in h, "未披露不着色且排序沉底"
+    assert "td.feehigh" in h and ":not(.feehigh)" in h, "提示色样式与悬停排除规则应存在"
+
+
 def test_pct_format():
     """阶段涨幅格式化：两位小数百分数，None/非数字 -> '--'（新基金未满期）"""
     assert pct(-4.07) == "-4.07%"
@@ -499,7 +548,10 @@ def test_fund_overview_row_raw_and_display():
     assert raw["emp_shares"] == 8544761.74, raw  # 从业人员精确份额（份）
     assert raw["emp_pct"] == 0.0639, raw  # 占基金总份额比例（%）
     assert raw["emp_cls"] == "" and raw["emp_cls_pct"] is None, raw  # 单级别基金无级别行，退回合计口径
+    assert isinstance(raw["fee_total"], float) and 0.1 <= raw["fee_total"] <= 3.0, raw  # F10 费率页合计（%/年）
+    assert raw["fee_floating"] is False, raw  # 005827 非浮动费率
     disp = display_row(raw)
+    assert disp["年费用率%"] == fmt_fee_pct(raw["fee_total"], raw["fee_floating"]), disp
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["从业人员持有本基金"] == "854.48万份(0.0639%)", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
@@ -568,6 +620,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     raw = fund_overview_row("005827", with_holding=True)
     fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
                 "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
+                "fee_total": None, "fee_floating": False,
                 "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
                 "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
     from ui.render import display_sort_values, pinyin_key
@@ -603,6 +656,8 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert '<th class="grp" colspan="3">同类排名</th>' in h, h
     assert 'onclick="sortTable(this)">近1年<span class="arr">' in h, "分组列叶子表头只显示子项"
     assert '<th rowspan="2" data-col="代码"' in h and '<th rowspan="2" data-col="规模(净资产)"' in h, h
+    assert '<th rowspan="2" data-col="年费用率%"' in h and f'data-sort="{raw["fee_total"]}"' in h, \
+        "年费用率列应有表头与数值排序键"
     assert 'data-col="同类排名(近1年)"' in h and 'data-col="同类排名(近5年)"' in h, \
         "data-col 保留完整列名，CSV 导出表头不变"
     assert "基金经理<br>持有本基金<span class=\"arr\">" in h, "超长表头应折成两行显示"

@@ -15,12 +15,13 @@ import re as _re
 import pandas as pd
 import streamlit as st
 
-from ui.constants import TWO_LINE_HEADERS
+from ui.constants import HIGH_FEE_PCT, TWO_LINE_HEADERS
 
 # 高亮底色（与总览表一致的半透明色，浅/深色主题都可读）
 _SMALL_BG = "rgba(229,57,53,0.45)"
 _UP_BG = "rgba(46,160,67,0.40)"
 _DOWN_BG = "rgba(229,57,53,0.45)"
+_FEE_HIGH_BG = "rgba(255,170,0,0.32)"
 
 _CSS = """
 :root { color-scheme: light dark; }
@@ -43,10 +44,11 @@ td { padding: 6px 9px; white-space: nowrap; border-bottom: 1px solid #e6e9ee; co
 td.dup { background: rgba(255,170,0,0.32); }
 td.small { background: __SMALL__; } td.up { background: __UP__; } td.down { background: __DOWN__; }
 td.mgrchg { background: rgba(255,170,0,0.45); }
+td.feehigh { background: __FEE_HIGH__; }
 /* 阶段涨幅：正收益红字 / 负收益绿字（A 股习惯红涨绿跌，文字色而非底色） */
 td.ret-up { color: #E53935; } td.ret-down { color: #2EA043; }
 /* 行悬停底色不覆盖高亮单元格（红/绿/琥珀提示悬停时保持可见） */
-tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg):not(.dup) { background: rgba(120,140,170,0.10); }
+tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg):not(.dup):not(.feehigh) { background: rgba(120,140,170,0.10); }
 @media (prefers-color-scheme: dark) {
   th { background: #212b3b; color: #dbe3ee; border-bottom-color: #364257; }
   th[data-col]:hover { background: #2a3648; }
@@ -54,7 +56,7 @@ tr:hover td:not(.small):not(.up):not(.down):not(.mgrchg):not(.dup) { background:
   td { color: #cfd7e3; border-bottom-color: #2c3646; }
   td.ret-up { color: #F85149; } td.ret-down { color: #3FB950; }
 }
-""".replace("__SMALL__", _SMALL_BG).replace("__UP__", _UP_BG).replace("__DOWN__", _DOWN_BG)
+""".replace("__SMALL__", _SMALL_BG).replace("__UP__", _UP_BG).replace("__DOWN__", _DOWN_BG).replace("__FEE_HIGH__", _FEE_HIGH_BG)
 
 _JS = """
 function sortTable(th) {
@@ -185,6 +187,10 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                 cls = "mgrchg"
             elif c in ("持有较上期", "较上期"):
                 cls = "up" if val.startswith("↑") else "down" if val.startswith("↓") else ""
+            elif c == "年费用率%":
+                # 年费用率偏高（管理+托管+销售服务 > HIGH_FEE_PCT %/年）琥珀底提醒——按数值排序键判定
+                kv = col_keys[ri] if col_keys is not None and ri < len(col_keys) else None
+                cls = "feehigh" if kv is not None and kv > HIGH_FEE_PCT else ""
             elif str(c).startswith("同类排名("):
                 # 同类排名各期：前25%红字（好）、后25%绿字（差）——按数值排序键判定，无键/未满期不着色
                 kv = col_keys[ri] if col_keys is not None and ri < len(col_keys) else None

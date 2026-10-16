@@ -92,6 +92,8 @@ def fund_overview_row(code, with_holding=True):
     - 原始值（渲染层用 render.display_row 格式化）：
       nav_yuan    float|None  期末净资产（元）
       small       bool        迷你基金（净资产 < SMALL_NAV_YUAN，清盘风险）
+      fee_total   float|None  年费用率（%/年）= 管理+托管+销售服务费之和（F10 费率页，浮费取上限）
+      fee_floating bool       任一运作费为多档浮动费率（展示值取上限档）
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
@@ -117,6 +119,10 @@ def fund_overview_row(code, with_holding=True):
         pr = get_client().peer_rank(code)
     except FundApiError:
         pr = {}
+    try:  # F10 费率页失败不致命
+        fee = get_client().fee_info(code)
+    except FundApiError:
+        fee = {}
     row = {
         "代码": code,
         "名称": info.get("SHORTNAME", "--"),
@@ -126,6 +132,10 @@ def fund_overview_row(code, with_holding=True):
         "净值日期": info.get("FSRQ", "--"),
         "nav_yuan": nav,
         "small": nav is not None and nav < SMALL_NAV_YUAN,
+        # 年费用率（%/年）= 管理+托管+销售服务费之和（F10 费率页，缺项按 0；全缺 None）
+        "fee_total": fee.get("total"),
+        # 任一运作费为多档浮动费率（如业绩挂钩 0.8%~1.6%），展示值取上限档
+        "fee_floating": bool(fee.get("floating")),
         "r1m": ret.get("r1m"),
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),
