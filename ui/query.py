@@ -94,6 +94,8 @@ def fund_overview_row(code, with_holding=True):
       small       bool        迷你基金（净资产 < SMALL_NAV_YUAN，清盘风险）
       fee_total   float|None  年费用率（%/年）= 管理+托管+销售服务费之和（F10 费率页，浮费取上限）
       fee_floating bool       任一运作费为多档浮动费率（展示值取上限档）
+      pe_w        float|None  重仓股（前十大）加权 PE-TTM（按占净值比例加权，剔除亏损股）
+      pe_avg      float|None  重仓股（前十大）平均 PE-TTM（盈利股算术平均）
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
@@ -123,6 +125,10 @@ def fund_overview_row(code, with_holding=True):
         fee = get_client().fee_info(code)
     except FundApiError:
         fee = {}
+    try:  # 重仓股 PE（移动端持仓+行情批量接口）失败不致命
+        hpe = get_client().fund_holdings_pe(code)
+    except FundApiError:
+        hpe = {}
     row = {
         "代码": code,
         "名称": info.get("SHORTNAME", "--"),
@@ -136,6 +142,9 @@ def fund_overview_row(code, with_holding=True):
         "fee_total": fee.get("total"),
         # 任一运作费为多档浮动费率（如业绩挂钩 0.8%~1.6%），展示值取上限档
         "fee_floating": bool(fee.get("floating")),
+        # 重仓股（最新季报前十大，含港股）PE-TTM：加权（按占净值比例）/ 平均，无重仓股为 None
+        "pe_w": hpe.get("weighted"),
+        "pe_avg": hpe.get("average"),
         "r1m": ret.get("r1m"),
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),

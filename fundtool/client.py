@@ -91,6 +91,35 @@ def _fee_pct(text):
     return max(vals), len(vals) > 1
 
 
+def calc_pe_stats(stocks):
+    """重仓股 PE 统计（纯函数，便于离线测试）。输入 [{code,name,pct,pe}]：
+    pct=占净值比例（%）、pe=PE-TTM（<=0 或 None 为亏损/未取到）。
+    返回 {weighted, average, loss_n, valid_n, covered_pct}：
+    - weighted 按占净值比例加权 Σ(pct*pe)/Σpct（仅盈利股，pct 缺按等权处理）
+    - average  盈利股简单算术平均 Σpe/n
+    - loss_n   亏损或无 PE 的只数（不参与计算，界面单独提示）
+    - covered_pct 重仓股合计占净值比例（%），全 None 的股票也计入（口径透明）
+    无盈利股时 weighted/average 为 None。"""
+    valid = [s for s in stocks or [] if s.get("pe") is not None and s["pe"] > 0]
+    loss_n = len(stocks or []) - len(valid)
+    covered = sum(s.get("pct") or 0.0 for s in stocks or [])
+    out = {"weighted": None, "average": None, "loss_n": loss_n,
+           "valid_n": len(valid), "covered_pct": round(covered, 2)}
+    if not valid:
+        return out
+    out["average"] = round(sum(s["pe"] for s in valid) / len(valid), 2)
+    if all(s.get("pct") for s in valid):  # 全部有占比才按权重加权，否则退化为等权平均
+        tw = sum(s["pct"] for s in valid)
+        out["weighted"] = round(sum(s["pct"] * s["pe"] for s in valid) / tw, 2)
+    else:
+        out["weighted"] = out["average"]
+    return out
+
+
+# 重仓股交易所 TEXCH -> 行情接口 secid 市场前缀（1=沪 2=深 5=港；北交所等未覆盖的记 None 不查 PE）
+_PE_MARKET = {"1": "1", "2": "0", "5": "116"}
+
+
 def parse_fee_page(text):
     """F10 费率页 HTML -> {mng/cust/sales: 数值|None, *_text: 原文, total, floating,
     buy_orig/buy_disc: 申购费首档原价/天天折扣, redeem: [[持有期限, 费率]…]}。
@@ -259,6 +288,57 @@ class EastFundClient:
         r = self._get(f"https://fundf10.eastmoney.com/jjfl_{code}.html")
         out = parse_fee_page(r.text)
         self.cache.set("fees_v1", code, out)
+        return out
+
+    def fund_holdings_pe(self, code):
+        """基金重仓股估值：移动端持仓接口（最新季报前十大重仓股，含港股市值占比）
+        + 行情接口批量取 PE-TTM，合成明细与统计。返回：
+        {stocks: [{code,name,pct,pe}], weighted, average, loss_n, valid_n, covered_pct}
+        （字段含义见 calc_pe_stats；pe<=0/None 为亏损或未覆盖交易所）。
+        持仓季度更新但 PE 随行情变动，整体缓存 12 小时（与阶段涨幅一致）。
+        无重仓股（债基/货基/未披露）返回 {stocks: []}。附加信息，失败不致命。"""
+        cached = self.cache.get("hpe_v1", code, ttl=12 * 3600)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition",
+            params={"FCODE": code, "deviceid": "1", "plat": "Iphone",
+                    "product": "EFund", "version": "6.2.5"},
+        )
+        rows = ((r.json() or {}).get("Datas") or {}).get("fundStocks") or []
+        stocks = []
+        for it in rows:
+            pct = None
+            try:
+                pct = float(it.get("JZBL"))
+            except (TypeError, ValueError):
+                pass
+            stocks.append({"code": str(it.get("GPDM") or ""), "name": it.get("GPJC") or "",
+                           "pct": pct, "secid": None, "pe": None})
+        # 批量查 PE-TTM（f115）：亏损为负数、无效代码自动缺席
+        secids = []
+        for s, it in zip(stocks, rows):
+            mkt = _PE_MARKET.get(str(it.get("TEXCH") or ""))
+            if mkt and s["code"]:
+                s["secid"] = f"{mkt}.{s['code']}"
+                secids.append(s["secid"])
+        if secids:
+            r2 = self._get(
+                "https://push2.eastmoney.com/api/qt/ulist.np/get",
+                params={"secids": ",".join(secids), "fields": "f12,f13,f115", "fltt": "2"},
+            )
+            pe_map = {}
+            for it in ((r2.json() or {}).get("data") or {}).get("diff") or []:
+                try:
+                    pe_map[f"{it.get('f13')}.{it.get('f12')}"] = float(it.get("f115"))
+                except (TypeError, ValueError):
+                    pass
+            for s in stocks:
+                if s["secid"] and s["secid"] in pe_map:
+                    s["pe"] = pe_map[s["secid"]]
+        out = {"stocks": stocks}
+        out.update(calc_pe_stats(stocks))
+        self.cache.set("hpe_v1", code, out)
         return out
 
     def search_funds(self, keyword):

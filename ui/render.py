@@ -103,6 +103,14 @@ def fmt_buy_fee(fee):
     return f"{orig} → 天天基金 {disc}" if disc else orig
 
 
+def fmt_pe(value):
+    """重仓股 PE-TTM 原始值 -> '27.5'（一位小数）；None -> '--'（无重仓股/债基/获取失败）"""
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "--"
+
+
 def _trim_pct(pct_val):
     """占比数值 -> 最多 4 位小数去尾零的字符串（8.335325 -> '8.3353'）"""
     return f"{pct_val:.4f}".rstrip("0").rstrip(".")
@@ -149,6 +157,8 @@ def display_row(row):
         "基金经理": row["基金经理"],
         "规模(净资产)": scale,
         "年费用率%": fmt_fee_pct(row.get("fee_total"), row.get("fee_floating")),
+        "持仓加权PE": fmt_pe(row.get("pe_w")),
+        "持仓平均PE": fmt_pe(row.get("pe_avg")),
         "规模日期": row["规模日期"],
         "净值日期": row["净值日期"],
         "近1月": pct(row.get("r1m")),
@@ -179,6 +189,8 @@ def display_sort_values(rows):
         "名称": [pinyin_key(r.get("名称")) for r in rows],
         "规模(净资产)": [r.get("nav_yuan") for r in rows],
         "年费用率%": [r.get("fee_total") for r in rows],
+        "持仓加权PE": [r.get("pe_w") for r in rows],
+        "持仓平均PE": [r.get("pe_avg") for r in rows],
         "近1月": [r.get("r1m") for r in rows],
         "近3月": [r.get("r3m") for r in rows],
         "近6月": [r.get("r6m") for r in rows],
@@ -279,6 +291,38 @@ def render_fund_detail(code, with_holding=None):
             "运作费（管理/托管/销售服务）每日从基金资产计提、净值已扣除，无需另行支付；"
             "申购费为「小于100万元」首档（天天基金优惠价）；赎回费按持有期限递减、先进先出"
         )
+    st.markdown("**重仓股估值（最新季报前十大，PE-TTM）**")
+    try:
+        hpe = get_client().fund_holdings_pe(code)
+    except FundApiError:
+        hpe = None
+    if hpe is None:
+        st.caption("重仓股估值获取失败（网络恢复后重开本页即可）")
+    elif not hpe.get("stocks"):
+        st.caption("该基金无股票重仓披露（债基/货基或未披露持仓）")
+    else:
+        rows = []
+        for s in hpe["stocks"]:
+            pe = s.get("pe")
+            rows.append({
+                "股票": s["name"], "代码": s["code"],
+                "占净值%": s.get("pct") if s.get("pct") is not None else "--",
+                "PE(TTM)": (f"{pe:.2f}" if pe is not None and pe > 0
+                            else "亏损" if pe is not None else "--"),
+            })
+        hdf = pd.DataFrame(rows)
+        if hpe.get("loss_n"):
+            hdf = hdf.style.apply(
+                lambda col: ["color: #E53935" if v == "亏损" else "" for v in col], subset=["PE(TTM)"]
+            ).hide(axis="index")
+        else:
+            hdf = hdf.style.hide(axis="index")
+        st.table(hdf)
+        cap = (f"前十大合计占净值 {hpe.get('covered_pct')}%；"
+               f"加权PE {fmt_pe(hpe.get('weighted'))} · 平均PE {fmt_pe(hpe.get('average'))}")
+        if hpe.get("loss_n"):
+            cap += f" · 含 {hpe['loss_n']} 只亏损/无PE（不参与计算）"
+        st.caption(cap)
     if with_holding:
         st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
         hold = get_manager_holding(get_client(), code)
@@ -374,6 +418,7 @@ def render_manager_funds(m, page=""):
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
                        "fee_total": None, "fee_floating": False,
+                       "pe_w": None, "pe_avg": None,
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
                        "r2y": None, "rytd": None, "r3y": None, "r5y": None,
                        "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
@@ -541,6 +586,7 @@ def render_group(name, codes, results):
         # 「代码」按数字、「名称」按拼音；重复行整行琥珀色。导出 CSV 随当前显示顺序
         st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；「名称」按拼音、「代码」按代码数字；导出的 CSV 与当前显示顺序一致")
         st.caption("💰 「年费用率%」= 管理+托管+销售服务费（%/年），浮费型取上限档带 *，偏高琥珀底提示；各档原文见基金详情")
+        st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除）；仅前十大非全部持仓，明细见基金详情")
         render_sortable_table(
             disp,
             small_codes=small_here,

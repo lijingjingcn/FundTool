@@ -490,6 +490,34 @@ def test_sortable_table_fee_highlight():
     assert "td.feehigh" in h and ":not(.feehigh)" in h, "提示色样式与悬停排除规则应存在"
 
 
+def test_calc_pe_stats():
+    """重仓股 PE 统计：按占净值比例加权、盈利股算术平均、亏损/无PE 剔除并计数、覆盖度合计"""
+    from fundtool.client import calc_pe_stats
+    stocks = [
+        {"code": "688401", "name": "路维光电", "pct": 8.87, "pe": 38.19},
+        {"code": "300604", "name": "长川科技", "pct": 7.79, "pe": 70.63},
+        {"code": "600519", "name": "贵州茅台", "pct": 4.66, "pe": 20.45},
+    ]
+    st = calc_pe_stats(stocks)
+    assert st["weighted"] == 46.17, st  # (8.87*38.19+7.79*70.63+4.66*20.45)/21.32，高权重高PE拉高加权值
+    assert st["average"] == 43.09 and st["loss_n"] == 0 and st["valid_n"] == 3, st
+    assert st["covered_pct"] == 21.32, st
+    loss = calc_pe_stats(stocks + [{"code": "688180", "name": "君实生物-U", "pct": 2.0, "pe": -70.78},
+                                   {"code": "899999", "name": "北交所股", "pct": 1.0, "pe": None}])
+    assert loss["loss_n"] == 2 and loss["valid_n"] == 3, loss  # 亏损/无PE 不参与计算
+    assert loss["weighted"] == st["weighted"] and loss["covered_pct"] == 24.32, loss
+    assert calc_pe_stats([])["weighted"] is None, "空持仓"
+    assert calc_pe_stats([{"code": "x", "name": "全亏", "pct": 5.0, "pe": -1.0}])["average"] is None, \
+        "全亏损无平均"
+
+
+def test_fmt_pe():
+    """PE 格式化：一位小数；None/非数字 -> '--'（债基无重仓股/获取失败）"""
+    from ui.render import fmt_pe
+    assert fmt_pe(27.53) == "27.5" and fmt_pe(20) == "20.0"
+    assert fmt_pe(None) == "--" and fmt_pe("") == "--" and fmt_pe("abc") == "--"
+
+
 def test_pct_format():
     """阶段涨幅格式化：两位小数百分数，None/非数字 -> '--'（新基金未满期）"""
     assert pct(-4.07) == "-4.07%"
@@ -550,8 +578,11 @@ def test_fund_overview_row_raw_and_display():
     assert raw["emp_cls"] == "" and raw["emp_cls_pct"] is None, raw  # 单级别基金无级别行，退回合计口径
     assert isinstance(raw["fee_total"], float) and 0.1 <= raw["fee_total"] <= 3.0, raw  # F10 费率页合计（%/年）
     assert raw["fee_floating"] is False, raw  # 005827 非浮动费率
+    assert isinstance(raw["pe_w"], float) and 5.0 <= raw["pe_w"] <= 60.0, raw  # 前十大加权 PE-TTM
+    assert isinstance(raw["pe_avg"], float) and raw["pe_w"] > 0, raw
     disp = display_row(raw)
     assert disp["年费用率%"] == fmt_fee_pct(raw["fee_total"], raw["fee_floating"]), disp
+    assert disp["持仓加权PE"] == f"{raw['pe_w']:.1f}" and disp["持仓平均PE"] == f"{raw['pe_avg']:.1f}", disp
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["从业人员持有本基金"] == "854.48万份(0.0639%)", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")
@@ -620,7 +651,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     raw = fund_overview_row("005827", with_holding=True)
     fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
                 "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
-                "fee_total": None, "fee_floating": False,
+                "fee_total": None, "fee_floating": False, "pe_w": None, "pe_avg": None,
                 "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
                 "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
     from ui.render import display_sort_values, pinyin_key
@@ -658,6 +689,8 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     assert '<th rowspan="2" data-col="代码"' in h and '<th rowspan="2" data-col="规模(净资产)"' in h, h
     assert '<th rowspan="2" data-col="年费用率%"' in h and f'data-sort="{raw["fee_total"]}"' in h, \
         "年费用率列应有表头与数值排序键"
+    assert '<th rowspan="2" data-col="持仓加权PE"' in h and f'data-sort="{raw["pe_w"]}"' in h, \
+        "持仓加权PE列应有表头与数值排序键"
     assert 'data-col="同类排名(近1年)"' in h and 'data-col="同类排名(近5年)"' in h, \
         "data-col 保留完整列名，CSV 导出表头不变"
     assert "基金经理<br>持有本基金<span class=\"arr\">" in h, "超长表头应折成两行显示"
