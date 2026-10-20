@@ -96,6 +96,8 @@ def fund_overview_row(code, with_holding=True):
       fee_floating bool       任一运作费为多档浮动费率（展示值取上限档）
       pe_w        float|None  重仓股（前十大）加权 PE-TTM（按占净值比例加权，剔除亏损股）
       pe_avg      float|None  重仓股（前十大）平均 PE-TTM（盈利股算术平均）
+      pe_extreme  bool        含微利异常股（PE>500，已计入统计），总览表琥珀底提示
+      pe_loss_n   int         亏损/无PE 只数（已剔除出统计），总览表数字后缀「剔N」
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
@@ -145,6 +147,10 @@ def fund_overview_row(code, with_holding=True):
         # 重仓股（最新季报前十大，含港股）PE-TTM：加权（按占净值比例）/ 平均，无重仓股为 None
         "pe_w": hpe.get("weighted"),
         "pe_avg": hpe.get("average"),
+        # 含微利异常股（PE-TTM>PE_EXTREME，已计入加权/平均），总览表琥珀底提示
+        "pe_extreme": bool(hpe.get("extreme_n")),
+        # 亏损/无PE 剔除只数（不参与加权/平均），总览表数字后缀「剔N」提示口径
+        "pe_loss_n": hpe.get("loss_n") or 0,
         "r1m": ret.get("r1m"),
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),

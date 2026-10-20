@@ -12,6 +12,11 @@ from .jschallenge import looks_like_challenge, solve
 # 注意：fundmobapi 的风控会拒绝带 AppleWebKit 字样的 UA，这里必须用简短 UA
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
+# 重仓股 PE 统计的微利提示阈值（倍）：PE-TTM 超过该值的股票盈利近乎为零（如茂莱光学
+# 11.7万倍），计入加权/平均（忠实反映持仓），但界面琥珀底提示该基金"含微利股"——
+# 极端市盈率会把数字显著放大，跨基金比较时需留意
+PE_EXTREME = 500.0
+
 
 class FundApiError(Exception):
     pass
@@ -93,17 +98,19 @@ def _fee_pct(text):
 
 def calc_pe_stats(stocks):
     """重仓股 PE 统计（纯函数，便于离线测试）。输入 [{code,name,pct,pe}]：
-    pct=占净值比例（%）、pe=PE-TTM（<=0 或 None 为亏损/未取到）。
-    返回 {weighted, average, loss_n, valid_n, covered_pct}：
-    - weighted 按占净值比例加权 Σ(pct*pe)/Σpct（仅盈利股，pct 缺按等权处理）
-    - average  盈利股简单算术平均 Σpe/n
-    - loss_n   亏损或无 PE 的只数（不参与计算，界面单独提示）
-    - covered_pct 重仓股合计占净值比例（%），全 None 的股票也计入（口径透明）
-    无盈利股时 weighted/average 为 None。"""
+    pct=占净值比例（%）、pe=PE-TTM。亏损/无PE（pe<=0 或 None，记 loss_n）不参与计算；
+    微利异常（pe>PE_EXTREME，记 extreme_n）**照常计入**加权/平均（忠实反映持仓），
+    但界面会提示该数字被极端市盈率显著放大。
+    返回 {weighted, average, loss_n, extreme_n, valid_n, covered_pct}：
+    - weighted 按占净值比例加权 Σ(pct*pe)/Σpct（仅有效股，pct 缺按等权处理）
+    - average  有效股简单算术平均 Σpe/n
+    - covered_pct 重仓股合计占净值比例（%），亏损股也计入（口径透明）
+    无有效股时 weighted/average 为 None。"""
     valid = [s for s in stocks or [] if s.get("pe") is not None and s["pe"] > 0]
+    extreme_n = sum(1 for s in valid if s["pe"] > PE_EXTREME)
     loss_n = len(stocks or []) - len(valid)
     covered = sum(s.get("pct") or 0.0 for s in stocks or [])
-    out = {"weighted": None, "average": None, "loss_n": loss_n,
+    out = {"weighted": None, "average": None, "loss_n": loss_n, "extreme_n": extreme_n,
            "valid_n": len(valid), "covered_pct": round(covered, 2)}
     if not valid:
         return out
@@ -293,11 +300,12 @@ class EastFundClient:
     def fund_holdings_pe(self, code):
         """基金重仓股估值：移动端持仓接口（最新季报前十大重仓股，含港股市值占比）
         + 行情接口批量取 PE-TTM，合成明细与统计。返回：
-        {stocks: [{code,name,pct,pe}], weighted, average, loss_n, valid_n, covered_pct}
-        （字段含义见 calc_pe_stats；pe<=0/None 为亏损或未覆盖交易所）。
-        持仓季度更新但 PE 随行情变动，整体缓存 12 小时（与阶段涨幅一致）。
+        {stocks: [{code,name,pct,pe}], weighted, average, loss_n, extreme_n, valid_n, covered_pct}
+        （字段含义见 calc_pe_stats；亏损/无PE 不参与计算，微利异常股计入并由界面提示）。
+        持仓季度更新但 PE 随行情变动，整体缓存 12 小时（与阶段涨幅一致）；
+        缓存 v3：v2 曾把微利异常股剔除出统计，按用户口径改回复实计入+提示，升键强制重算。
         无重仓股（债基/货基/未披露）返回 {stocks: []}。附加信息，失败不致命。"""
-        cached = self.cache.get("hpe_v1", code, ttl=12 * 3600)
+        cached = self.cache.get("hpe_v3", code, ttl=12 * 3600)
         if cached is not None:
             return cached
         r = self._get(
@@ -338,7 +346,7 @@ class EastFundClient:
                     s["pe"] = pe_map[s["secid"]]
         out = {"stocks": stocks}
         out.update(calc_pe_stats(stocks))
-        self.cache.set("hpe_v1", code, out)
+        self.cache.set("hpe_v3", code, out)
         return out
 
     def search_funds(self, keyword):

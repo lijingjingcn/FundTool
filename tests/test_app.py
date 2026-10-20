@@ -490,6 +490,25 @@ def test_sortable_table_fee_highlight():
     assert "td.feehigh" in h and ":not(.feehigh)" in h, "提示色样式与悬停排除规则应存在"
 
 
+def test_sortable_table_pe_extreme_highlight():
+    """含微利股的基金：两个 PE 单元格琥珀底提示（数字忠实计入、只提醒被放大）；
+    亏损股剔除以「剔N」后缀标注（展示文本带后缀、排序键仍为数值）；不含的不标"""
+    from ui.render import display_row, display_sort_values
+    base = {"代码": "002095", "名称": "电气基金", "类型": "--", "基金经理": "--", "规模日期": "--",
+            "净值日期": "--", "nav_yuan": None, "small": False, "holding": "",
+            "fee_total": None, "fee_floating": False,
+            "pe_w": 30658.91, "pe_avg": 23849.26, "pe_extreme": True, "pe_loss_n": 1}
+    clean = dict(base, 代码="007016", 名称="无微利", pe_w=32.75, pe_avg=28.87,
+                 pe_extreme=False, pe_loss_n=0)
+    rows = [base, clean]
+    h = sortable_table_html(pd.DataFrame([display_row(r) for r in rows]),
+                            sort_values=display_sort_values(rows),
+                            pe_extreme_codes={"002095"})
+    assert '<td class="feehigh" data-sort="30658.91">30658.9剔1</td>' in h, h
+    assert '<td class="feehigh" data-sort="23849.26">23849.3剔1</td>' in h, h
+    assert '<td class="" data-sort="32.75">32.8</td>' in h, "无微利/无亏损的 PE 不带提示色与后缀"
+
+
 def test_calc_pe_stats():
     """重仓股 PE 统计：按占净值比例加权、盈利股算术平均、亏损/无PE 剔除并计数、覆盖度合计"""
     from fundtool.client import calc_pe_stats
@@ -506,16 +525,32 @@ def test_calc_pe_stats():
                                    {"code": "899999", "name": "北交所股", "pct": 1.0, "pe": None}])
     assert loss["loss_n"] == 2 and loss["valid_n"] == 3, loss  # 亏损/无PE 不参与计算
     assert loss["weighted"] == st["weighted"] and loss["covered_pct"] == 24.32, loss
+    # 微利股计入统计（002095 实况：茂莱光学 11.7 万倍 PE，extreme_n 计数供界面琥珀底提示）：
+    # 加权/平均忠实包含茂莱光学与新相微（PE>500 记 extreme_n=2），亏损的汇成真空仍剔除
+    real = calc_pe_stats([
+        {"code": "688502", "name": "茂莱光学", "pct": 9.7, "pe": 117408.81},
+        {"code": "688120", "name": "华海清科", "pct": 9.5, "pe": 98.08},
+        {"code": "301392", "name": "汇成真空", "pct": 8.53, "pe": -2578.86},
+        {"code": "300260", "name": "新莱应材", "pct": 6.7, "pe": 115.23},
+        {"code": "688593", "name": "新相微", "pct": 6.63, "pe": 1376.07},
+        {"code": "002851", "name": "麦格米特", "pct": 5.01, "pe": 248.09},
+    ])
+    assert real["extreme_n"] == 2 and real["loss_n"] == 1 and real["valid_n"] == 5, real
+    assert real["average"] == 23849.26, real  # 含 11.7 万倍：数字被显著放大（界面琥珀底提示）
+    assert real["weighted"] == 30658.91, real
+    assert real["covered_pct"] == 46.07, real  # 覆盖度含全部重仓（口径透明）
     assert calc_pe_stats([])["weighted"] is None, "空持仓"
     assert calc_pe_stats([{"code": "x", "name": "全亏", "pct": 5.0, "pe": -1.0}])["average"] is None, \
         "全亏损无平均"
 
 
 def test_fmt_pe():
-    """PE 格式化：一位小数；None/非数字 -> '--'（债基无重仓股/获取失败）"""
+    """PE 格式化：一位小数；亏损/无PE 剔除时追加「剔N」后缀；None/非数字 -> '--'（债基无重仓股/获取失败）"""
     from ui.render import fmt_pe
     assert fmt_pe(27.53) == "27.5" and fmt_pe(20) == "20.0"
-    assert fmt_pe(None) == "--" and fmt_pe("") == "--" and fmt_pe("abc") == "--"
+    assert fmt_pe(32.75, 2) == "32.8剔2" and fmt_pe(28.87, 1) == "28.9剔1"
+    assert fmt_pe(None) == "--" and fmt_pe(None, 3) == "--"  # 无有效股时后缀无意义
+    assert fmt_pe("") == "--" and fmt_pe("abc") == "--"
 
 
 def test_pct_format():
@@ -580,9 +615,12 @@ def test_fund_overview_row_raw_and_display():
     assert raw["fee_floating"] is False, raw  # 005827 非浮动费率
     assert isinstance(raw["pe_w"], float) and 5.0 <= raw["pe_w"] <= 60.0, raw  # 前十大加权 PE-TTM
     assert isinstance(raw["pe_avg"], float) and raw["pe_w"] > 0, raw
+    assert raw["pe_extreme"] is False, raw  # 005827 重仓无微利异常股
     disp = display_row(raw)
     assert disp["年费用率%"] == fmt_fee_pct(raw["fee_total"], raw["fee_floating"]), disp
-    assert disp["持仓加权PE"] == f"{raw['pe_w']:.1f}" and disp["持仓平均PE"] == f"{raw['pe_avg']:.1f}", disp
+    _suffix = f"剔{raw['pe_loss_n']}" if raw.get("pe_loss_n") else ""
+    assert disp["持仓加权PE"] == f"{raw['pe_w']:.1f}{_suffix}", disp
+    assert disp["持仓平均PE"] == f"{raw['pe_avg']:.1f}{_suffix}", disp
     assert disp["基金经理持有本基金"] == ">100万份", disp
     assert disp["从业人员持有本基金"] == "854.48万份(0.0639%)", disp
     assert disp["规模(净资产)"].endswith("亿") and not disp["规模(净资产)"].endswith("亿 ⚠️")

@@ -156,17 +156,21 @@ def _grouped_thead_html(cols):
 
 
 def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
-                        sort_values=None, title="fund_table.csv", dup_codes=None) -> str:
+                        sort_values=None, title="fund_table.csv", dup_codes=None,
+                        pe_extreme_codes=None) -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
     small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
     mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色；
     dup_codes：跨分组/组内重复的代码集合，其行内所有单元格标琥珀色底（与单元格级
-    提示色叠加时提示色获胜）；sort_values：{列名: [排序键…]}，长度须与 df 行数一致，
+    提示色叠加时提示色获胜）；pe_extreme_codes：含微利异常股的代码集合，其
+    「持仓加权PE/平均PE」单元格标琥珀色（数字被极端市盈率放大，跨基金比较需留意）；
+    sort_values：{列名: [排序键…]}，长度须与 df 行数一致，
     键为数字或字符串（如「名称」的拼音键）或 None（沉底），未提供键的列按单元格文本排序。
     含「组(子项)」相邻同组列时表头自动两行分组。"""
     small_codes = set(small_codes or ())
     mgr_change_codes = set(mgr_change_codes or ())
     dup_codes = set(dup_codes or ())
+    pe_extreme_codes = set(pe_extreme_codes or ())
     sort_values = sort_values or {}
     cols = list(df.columns)
     thead = _grouped_thead_html(cols)
@@ -191,6 +195,9 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                 # 年费用率偏高（管理+托管+销售服务 > HIGH_FEE_PCT %/年）琥珀底提醒——按数值排序键判定
                 kv = col_keys[ri] if col_keys is not None and ri < len(col_keys) else None
                 cls = "feehigh" if kv is not None and kv > HIGH_FEE_PCT else ""
+            elif c in ("持仓加权PE", "持仓平均PE") and str(row.get("代码")) in pe_extreme_codes:
+                # 含微利异常股：PE 数字被极端市盈率放大，琥珀底提醒（数字本身忠实计入）
+                cls = "feehigh"
             elif str(c).startswith("同类排名("):
                 # 同类排名各期：前25%红字（好）、后25%绿字（差）——按数值排序键判定，无键/未满期不着色
                 kv = col_keys[ri] if col_keys is not None and ri < len(col_keys) else None
@@ -213,8 +220,10 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
 
 
 def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
-                          sort_values=None, title="fund_table.csv", dup_codes=None):
+                          sort_values=None, title="fund_table.csv", dup_codes=None,
+                          pe_extreme_codes=None):
     """在 Streamlit 页面上渲染可点表头排序的表格"""
     n = len(df)
     height = min(120 + 36 * n, 700)
-    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title, dup_codes), height=height)
+    st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title,
+                                  dup_codes, pe_extreme_codes), height=height)

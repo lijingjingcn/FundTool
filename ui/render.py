@@ -19,6 +19,7 @@ from fundtool import (
     get_manager_holding_history,
     range_rank,
 )
+from fundtool.client import PE_EXTREME
 from ui.constants import HISTORY_N, SMALL_NAV_YUAN
 from ui.query import (
     emp_nums,
@@ -103,10 +104,11 @@ def fmt_buy_fee(fee):
     return f"{orig} → 天天基金 {disc}" if disc else orig
 
 
-def fmt_pe(value):
-    """重仓股 PE-TTM 原始值 -> '27.5'（一位小数）；None -> '--'（无重仓股/债基/获取失败）"""
+def fmt_pe(value, loss_n=0):
+    """重仓股 PE-TTM 原始值 -> '27.5'（一位小数）；剔除了亏损/无PE 股票时追加后缀
+    '剔N'（如 '32.8剔2'，口径透明）；None -> '--'（无重仓股/债基/获取失败）"""
     try:
-        return f"{float(value):.1f}"
+        return f"{float(value):.1f}" + (f"剔{loss_n}" if loss_n else "")
     except (TypeError, ValueError):
         return "--"
 
@@ -157,10 +159,17 @@ def display_row(row):
         "基金经理": row["基金经理"],
         "规模(净资产)": scale,
         "年费用率%": fmt_fee_pct(row.get("fee_total"), row.get("fee_floating")),
-        "持仓加权PE": fmt_pe(row.get("pe_w")),
-        "持仓平均PE": fmt_pe(row.get("pe_avg")),
+        "持仓加权PE": fmt_pe(row.get("pe_w"), row.get("pe_loss_n") or 0),
+        "持仓平均PE": fmt_pe(row.get("pe_avg"), row.get("pe_loss_n") or 0),
         "规模日期": row["规模日期"],
         "净值日期": row["净值日期"],
+        "基金经理持有本基金": format_range(row.get("holding")) or "--",
+        "从业人员持有本基金": fmt_employee_holding_pair(
+            row.get("emp_cls"), row.get("emp_cls_pct"), row.get("emp_shares"), row.get("emp_pct")
+        ),
+        "持有数据来源": row.get("holding_src") or "--",
+        "持有较上期": _fmt_change(row.get("holding_chg")),
+        # 阶段涨幅与同类排名列放最后：基础属性/持有信息优先，比较估值时不用左右滚动
         "近1月": pct(row.get("r1m")),
         "近3月": pct(row.get("r3m")),
         "近6月": pct(row.get("r6m")),
@@ -172,12 +181,6 @@ def display_row(row):
         "同类排名(近1年)": peer_pct(row.get("r1y_peer_pct")),
         "同类排名(近3年)": peer_pct(row.get("r3y_peer_pct")),
         "同类排名(近5年)": peer_pct(row.get("r5y_peer_pct")),
-        "基金经理持有本基金": format_range(row.get("holding")) or "--",
-        "从业人员持有本基金": fmt_employee_holding_pair(
-            row.get("emp_cls"), row.get("emp_cls_pct"), row.get("emp_shares"), row.get("emp_pct")
-        ),
-        "持有数据来源": row.get("holding_src") or "--",
-        "持有较上期": _fmt_change(row.get("holding_chg")),
     }
 
 
@@ -304,24 +307,37 @@ def render_fund_detail(code, with_holding=None):
         rows = []
         for s in hpe["stocks"]:
             pe = s.get("pe")
+            if pe is None:
+                pe_txt = "--"
+            elif pe <= 0:
+                pe_txt = "亏损"
+            elif pe > PE_EXTREME:  # 微利异常：显示原值（千分位整数+⚠），琥珀字，不参与统计
+                pe_txt = f"{pe:,.0f}⚠"
+            else:
+                pe_txt = f"{pe:.2f}"
             rows.append({
                 "股票": s["name"], "代码": s["code"],
                 "占净值%": s.get("pct") if s.get("pct") is not None else "--",
-                "PE(TTM)": (f"{pe:.2f}" if pe is not None and pe > 0
-                            else "亏损" if pe is not None else "--"),
+                "PE(TTM)": pe_txt,
             })
         hdf = pd.DataFrame(rows)
-        if hpe.get("loss_n"):
-            hdf = hdf.style.apply(
-                lambda col: ["color: #E53935" if v == "亏损" else "" for v in col], subset=["PE(TTM)"]
-            ).hide(axis="index")
-        else:
-            hdf = hdf.style.hide(axis="index")
+
+        def _pe_color(v):
+            if v == "亏损":
+                return "color: #E53935"
+            if v.endswith("⚠"):
+                return "color: #B8860B"
+            return ""
+
+        hdf = hdf.style.apply(lambda col: [_pe_color(v) for v in col], subset=["PE(TTM)"]).hide(axis="index")
         st.table(hdf)
         cap = (f"前十大合计占净值 {hpe.get('covered_pct')}%；"
                f"加权PE {fmt_pe(hpe.get('weighted'))} · 平均PE {fmt_pe(hpe.get('average'))}")
+        if hpe.get("extreme_n"):
+            cap += (f" · ⚠ 含 {hpe['extreme_n']} 只微利股(PE>{PE_EXTREME:.0f})，"
+                    f"其极端市盈率已计入加权/平均，数字可能被显著放大")
         if hpe.get("loss_n"):
-            cap += f" · 含 {hpe['loss_n']} 只亏损/无PE（不参与计算）"
+            cap += f" · 亏损/无PE {hpe['loss_n']}只未参与计算"
         st.caption(cap)
     if with_holding:
         st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
@@ -406,7 +422,7 @@ def render_manager_funds(m, page=""):
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
     # 与分组总览同一套列：含基金经理持有本基金、从业人员持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位、从业人员按精确份额）
-    raw_rows, small_here, mgrchg_here = [], set(), set()
+    raw_rows, small_here, mgrchg_here, peext_here = [], set(), set(), set()
     with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理/从业人员持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
             _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
@@ -418,7 +434,7 @@ def render_manager_funds(m, page=""):
                 row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
                        "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
                        "fee_total": None, "fee_floating": False,
-                       "pe_w": None, "pe_avg": None,
+                       "pe_w": None, "pe_avg": None, "pe_extreme": False, "pe_loss_n": 0,
                        "r1m": None, "r3m": None, "r6m": None, "r1y": None,
                        "r2y": None, "rytd": None, "r3y": None, "r5y": None,
                        "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
@@ -430,6 +446,8 @@ def render_manager_funds(m, page=""):
                     small_here.add(_code)
                 if row["mgr_chg"]:
                     mgrchg_here.add(_code)
+                if row.get("pe_extreme"):
+                    peext_here.add(_code)
             raw_rows.append(row)
         _mst.update(label="查询完成", state="complete", expanded=False)
     st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
@@ -437,6 +455,7 @@ def render_manager_funds(m, page=""):
         pd.DataFrame([display_row(r) for r in raw_rows]),
         small_codes=small_here,
         mgr_change_codes=mgrchg_here,
+        pe_extreme_codes=peext_here,
         sort_values=display_sort_values(raw_rows),
         title=f"基金信息-经理{m['name']}.csv",
     )
@@ -582,16 +601,18 @@ def render_group(name, codes, results):
         disp = pd.DataFrame([display_row(r) for r in raw_rows])
         small_here = {r["代码"] for r in raw_rows if r.get("small")}
         mgrchg_here = {r["代码"] for r in raw_rows if r.get("mgr_chg")}
+        peext_here = {r["代码"] for r in raw_rows if r.get("pe_extreme")}
         # 可点表头排序的 HTML 表格（与经理视图/筛选页同款组件）：数值列按原始值排，
         # 「代码」按数字、「名称」按拼音；重复行整行琥珀色。导出 CSV 随当前显示顺序
         st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；「名称」按拼音、「代码」按代码数字；导出的 CSV 与当前显示顺序一致")
         st.caption("💰 「年费用率%」= 管理+托管+销售服务费（%/年），浮费型取上限档带 *，偏高琥珀底提示；各档原文见基金详情")
-        st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除）；仅前十大非全部持仓，明细见基金详情")
+        st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除并以「剔N」标注）；仅前十大非全部持仓，明细见基金详情。琥珀底 = 含微利股(PE>500)，数字被极端市盈率放大，比较时需留意")
         render_sortable_table(
             disp,
             small_codes=small_here,
             mgr_change_codes=mgrchg_here,
             dup_codes=highlight,
+            pe_extreme_codes=peext_here,
             sort_values=display_sort_values(raw_rows),
             title=f"基金信息-{name}.csv",
         )
