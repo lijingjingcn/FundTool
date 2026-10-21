@@ -56,6 +56,27 @@ KEY_MANAGER_DUP = "manager_dup_names"     # 同名经理提示 {名字: 匹配�
 # FOF 持仓分析页
 KEY_FOF_RESULT = "fof_result"             # 分析结果 {types, agg, n_fof, n_empty}，见 page_fof
 
+# ---------------- 页面偏好（跨会话持久化，页面偏好.json） ----------------
+# 轻量 key-value 存储（如 FOF 页的类型筛选选择），与分组/查询历史同款本地文件模式；
+# 测试通过 FUNDTOOL_PREF_FILE 指向临时文件，避免覆盖真实偏好
+PREF_FILE = os.environ.get("FUNDTOOL_PREF_FILE") or os.path.join(BASE_DIR, "页面偏好.json")
+
+
+def load_prefs():
+    """读页面偏好 dict；文件不存在/损坏返回 {}"""
+    try:
+        with open(PREF_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(prefs):
+    """整表写回页面偏好 dict"""
+    with open(PREF_FILE, "w", encoding="utf-8") as f:
+        json.dump(prefs, f, ensure_ascii=False, indent=2)
+
 
 @st.cache_resource
 def get_client():

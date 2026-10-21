@@ -15,7 +15,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool.client import aggregate_fof_holdings, parent_fund_key  # noqa: E402
 from ui.detail import render_fund_detail  # noqa: E402
-from ui.state import KEY_FOF_RESULT, get_client  # noqa: E402
+from ui.state import KEY_FOF_RESULT, get_client, load_prefs, save_prefs  # noqa: E402
 
 st.title("🧺 FOF 持仓分析")
 st.caption(
@@ -41,8 +41,10 @@ def dedupe_fof_universe(fof_list):
             for g in groups.values()]
 
 
-def fof_result_rows(agg, type_by_code):
-    """聚合结果 -> 结果表展示行 + 排序键（纯函数，便于测试）。份额分布如 'A:3 C:2'。"""
+def fof_result_rows(agg, type_by_code, mgr_by_code=None):
+    """聚合结果 -> 结果表展示行（纯函数，便于测试）。份额分布如 'A:3 C:2'；
+    type_by_code/mgr_by_code 分别为 代码->类型/代码->经理名（目录反查）映射。"""
+    mgr_by_code = mgr_by_code or {}
 
     def _share_letter(name):
         s = str(name or "").rstrip()
@@ -61,6 +63,7 @@ def fof_result_rows(agg, type_by_code):
             "母基金": r["key"],
             "代表份额": f"{r['rep_name']} {r['rep_code']}",
             "类型": type_by_code.get(r["rep_code"]) or "--",
+            "基金经理": mgr_by_code.get(r["rep_code"]) or "--",
             "被FOF持有数": n,
             "份额分布": " ".join(f"{k}:{v}" for k, v in sorted(dist.items())),
             "平均占比%": round(sum(pcts) / len(pcts), 2) if pcts else None,
@@ -110,7 +113,42 @@ if run or (st.session_state.get(KEY_FOF_RESULT) or {}).get("types") == types_sel
     st.success(f"共分析 {res['n_fof']} 只 FOF（母基金去重，{res['n_empty']} 只无持仓数据），"
                f"持有 {len(agg)} 个母基金。点表格里任意一行，下方显示持有它的 FOF 明细。")
     type_by_code = {u["code"]: u["type"] for u in client.fund_universe()}
-    rows, _ = fof_result_rows(agg, type_by_code)
+    # 经理目录反查 代码->现任经理名（共管基金多人以、连接）：一次目录缓存覆盖全部被持基金，
+    # 覆盖不到的（新基金/目录未收录）显示 '--'；目录获取失败不致命，整列退化为 '--'
+    mgr_by_code = {}
+    try:
+        for m in client.manager_dir():
+            for c in m.get("codes") or []:
+                mgr_by_code.setdefault(c, []).append(m["name"])
+        mgr_by_code = {c: "、".join(names) for c, names in mgr_by_code.items()}
+    except Exception:
+        mgr_by_code = {}
+    rows, _ = fof_result_rows(agg, type_by_code, mgr_by_code)
+    # 类型筛选：选项为结果中实际出现的类型（按基金数降序）；选择持久化到 页面偏好.json，
+    # 下次打开自动恢复（保存值含已消失的类型时过滤掉，全失效退回全选）
+    type_counts = {}
+    for r in rows:
+        type_counts[r["类型"]] = type_counts.get(r["类型"], 0) + 1
+    all_types = sorted(type_counts, key=lambda t: (-type_counts[t], t))
+    prefs = load_prefs()
+    saved = [t for t in (prefs.get("fof_types") or []) if t in all_types]
+    sel_types = st.multiselect(
+        "被持基金类型", all_types, default=saved or all_types,
+        help=f"共 {len(all_types)} 种类型（括号内为该类型的被持基金数）；选择会自动记住，下次打开免重选",
+        format_func=lambda t: f"{t}（{type_counts[t]}只）",
+    )
+    if sel_types != (prefs.get("fof_types") or []):
+        prefs["fof_types"] = sel_types
+        save_prefs(prefs)
+    if not sel_types:
+        st.warning("请至少选择一种类型")
+        st.stop()
+    n_all = len(rows)
+    keep = [i for i, r in enumerate(rows) if r["类型"] in sel_types]
+    agg = [agg[i] for i in keep]
+    rows = [rows[i] for i in keep]
+    if len(rows) < n_all:
+        st.caption(f"类型筛选后 {len(rows)} / {n_all} 只")
     df = pd.DataFrame(rows)
     # 点行选中 -> 下方联动持有人明细；st.dataframe 自带列头排序与工具栏 CSV 下载，
     # 数值列保持原始类型（None -> NaN 空单元格）排序才正确
