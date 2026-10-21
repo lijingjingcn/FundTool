@@ -16,7 +16,7 @@ from fundtool import (
     get_manager_holding_history,
 )
 from fundtool.client import PE_EXTREME
-from ui.constants import BENCHMARKS, HISTORY_N, SMALL_NAV_YUAN
+from ui.constants import BENCHMARKS, BENCHMARK_SHORT, HISTORY_N, SMALL_NAV_YUAN
 from ui.format import (
     _fmt_change,
     _trim_pct,
@@ -167,12 +167,11 @@ def _render_excess_block(code):
         return
     labels = (("近1月", "r1m"), ("近3月", "r3m"), ("近6月", "r6m"), ("今年以来", "rytd"),
               ("近1年", "r1y"), ("近2年", "r2y"), ("近3年", "r3y"), ("近5年", "r5y"))
-    short = {"hs300": "沪深300", "pghh": "偏股混合"}
     rows = []
     for label, key in labels:
         f = ret.get(key)
         r = {"区间": label, "基金": pct(f)}
-        for bk, sname in short.items():
+        for bk, sname in BENCHMARK_SHORT.items():
             bm = (bms.get(bk) or {}).get(key)
             ex = round(f - bm, 2) if f is not None and bm is not None else None
             r[sname] = pct(bm)

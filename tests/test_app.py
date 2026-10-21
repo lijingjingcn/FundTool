@@ -600,24 +600,32 @@ def test_fmt_excess_and_display_bench():
     base = {"代码": "005827", "名称": "易方达蓝筹", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "holding": ""}
     plain = display_row(dict(base))
-    assert "超额-近1年" not in plain, "不传基准不加超额列"
+    assert "超额-今年以来" not in plain, "不传基准不加超额列"
     row = dict(base, excess={"hs300": {"rytd": 4.25, "r1y": -3.06, "r3y": 12.8}})
     d = display_row(row, "hs300")
-    assert d["超额-今年以来"] == "+4.2" and d["超额-近1年"] == "-3.1" and d["超额-近3年"] == "+12.8", d
-    assert list(d)[-3:] == ["超额-今年以来", "超额-近1年", "超额-近3年"], "超额列在表尾"
+    assert d["沪深300超额(今年以来)"] == "+4.2", d
+    assert d["沪深300超额(近1年)"] == "-3.1" and d["沪深300超额(近3年)"] == "+12.8", d
+    cols = list(d)
+    assert cols.index("沪深300超额(近3年)") + 1 == cols.index("近1月"), "超额列插在阶段涨幅块之前（紧邻持有信息）"
     d_empty = display_row(dict(base), "hs300")
-    assert d_empty["超额-近1年"] == "--", "行内无 excess 数据时列保留但显示 --（列数稳定）"
+    assert d_empty["沪深300超额(近1年)"] == "--", "行内无 excess 数据时列保留但显示 --（列数稳定）"
+    d2 = display_row(dict(base, excess={"pghh": {"r1y": 1.5}}), "pghh")
+    assert d2["偏股混合超额(近1年)"] == "+1.5", "切换基准列名跟随基准短名"
     sv = display_sort_values([row, dict(base)], "hs300")
-    assert sv["超额-近1年"] == [-3.06, None], sv
+    assert sv["沪深300超额(近1年)"] == [-3.06, None], sv
 
 
 def test_sortable_table_excess_coloring():
-    """总览表超额列着色：正红字负绿字（A 股红=跑赢），-- 不着色"""
-    df = pd.DataFrame([{"代码": "005827", "超额-近1年": "+4.2", "超额-近3年": "-3.1", "超额-今年以来": "--"}])
+    """总览表超额列：组表头两行（上行=基准组名、下行=期间）；着色正红字负绿字（A 股红=跑赢），-- 不着色"""
+    df = pd.DataFrame([{"代码": "005827", "沪深300超额(近1年)": "+4.2", "沪深300超额(近3年)": "-3.1",
+                        "沪深300超额(今年以来)": "--"}])
     h = sortable_table_html(df)
     assert '<td class="ret-up" data-sort="+4.2">+4.2</td>' in h, h
     assert '<td class="ret-down" data-sort="-3.1">-3.1</td>' in h, h
     assert '<td class="" data-sort="--">--</td>' in h, h
+    # 相邻同组超额列自动两行表头：第一行组名（基准）跨3列、第二行期间子项
+    assert '<th class="grp" colspan="3">沪深300超额</th>' in h, h
+    assert 'onclick="sortTable(this)">近1年<span class="arr">' in h, "分组叶子表头只显示期间"
 
 
 def test_index_period_returns():

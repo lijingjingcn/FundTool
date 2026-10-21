@@ -15,6 +15,7 @@ import re
 from pypinyin import lazy_pinyin
 
 from fundtool import format_range, range_rank
+from ui.constants import BENCHMARK_SHORT
 
 
 # ---------------- 基础格式化 ----------------
@@ -200,28 +201,45 @@ RAW_ROW_DEFAULTS = {
 }
 
 
+# 阶段涨幅块在注册表中的起始位置（超额 3 列插在它之前：紧跟持有信息、不用横滚到表尾）
+_RETURN_START = next(i for i, (name, _, _) in enumerate(OVERVIEW_COLUMNS) if name == "近1月")
+
+
+def _excess_cells(row, bench):
+    """超额 3 列的 (列名, 展示值)。列名形如「沪深300超额(近1年)」——sortable_table 的
+    分组表头机制会把相邻同组列渲染成两行：上行组名=基准、下行期间，基准一目了然。"""
+    grp = f"{BENCHMARK_SHORT.get(bench, bench)}超额"
+    ex = (row.get("excess") or {}).get(bench) or {}
+    return [(f"{grp}(今年以来)", fmt_excess(ex.get("rytd"))),
+            (f"{grp}(近1年)", fmt_excess(ex.get("r1y"))),
+            (f"{grp}(近3年)", fmt_excess(ex.get("r3y")))]
+
+
 def display_row(row, bench=None):
     """原始行 -> 总览表展示行（列名即表头，列序即 OVERVIEW_COLUMNS）。纯函数。
-    bench 传入基准键（BENCHMARKS 之一）时，表尾追加 3 列超额收益
-    （超额-今年以来/近1年/近3年，基准由调用方切换，基金-基准百分点）。"""
-    out = {name: fmt(row) for name, fmt, _ in OVERVIEW_COLUMNS}
-    ex = (row.get("excess") or {}).get(bench) or {}
-    if bench is not None:
-        out["超额-今年以来"] = fmt_excess(ex.get("rytd"))
-        out["超额-近1年"] = fmt_excess(ex.get("r1y"))
-        out["超额-近3年"] = fmt_excess(ex.get("r3y"))
+    bench 传入基准键（BENCHMARKS 之一）时，在阶段涨幅块之前插入 3 列超额收益
+    （超额-今年以来/近1年/近3年，基金-基准百分点，紧邻持有信息列）。"""
+    out = {}
+    for i, (name, fmt, _) in enumerate(OVERVIEW_COLUMNS):
+        if bench is not None and i == _RETURN_START:
+            for k, v in _excess_cells(row, bench):
+                out[k] = v
+        out[name] = fmt(row)
     return out
 
 
 def display_sort_values(rows, bench=None):
     """原始行列表 -> sortable_table 的排序键（规模按元数、收益/持有按数值、变化按升降档；
     代码按数字、名称按拼音——字符串键由组件按 localeCompare 比较）。纯函数。
-    bench 含义同 display_row：追加超额 3 列的数值键。"""
-    out = {name: [key(r) for r in rows]
-           for name, _, key in OVERVIEW_COLUMNS if key is not None}
-    if bench is not None:
-        ex = [(r.get("excess") or {}).get(bench) or {} for r in rows]
-        out["超额-今年以来"] = [e.get("rytd") for e in ex]
-        out["超额-近1年"] = [e.get("r1y") for e in ex]
-        out["超额-近3年"] = [e.get("r3y") for e in ex]
+    bench 含义同 display_row：插入超额 3 列的数值键。"""
+    out = {}
+    for i, (name, _, key) in enumerate(OVERVIEW_COLUMNS):
+        if bench is not None and i == _RETURN_START:
+            ex_rows = [(r.get("excess") or {}).get(bench) or {} for r in rows]
+            grp = f"{BENCHMARK_SHORT.get(bench, bench)}超额"
+            out[f"{grp}(今年以来)"] = [e.get("rytd") for e in ex_rows]
+            out[f"{grp}(近1年)"] = [e.get("r1y") for e in ex_rows]
+            out[f"{grp}(近3年)"] = [e.get("r3y") for e in ex_rows]
+        if key is not None:
+            out[name] = [key(r) for r in rows]
     return out

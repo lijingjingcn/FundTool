@@ -31,6 +31,7 @@ from ui.state import (
     KEY_GROUP_MGR_VIEW,
     KEY_SINGLE_CODE,
     load_prefs,
+    save_prefs,
 )
 
 
@@ -203,9 +204,10 @@ def render_manager_drilldown(name, items):
 
 
 # ---------------- 分组整体：总览表 + 经理汇总/下钻 + 每只基金详情 ----------------
-def render_group(name, codes, results, bench=None):
+def render_group(name, codes, results):
     """一个分组的结果：总览表 + 经理汇总/下钻 + 每只基金详情。重复的基金整行高亮。
-    bench：超额收益基准键（BENCHMARKS 之一），None 则总览表不带超额 3 列。
+    总览表带超额 3 列，基准切换按钮就在表格上方（选择记忆到页面偏好，
+    经理视图的超额列跟随同一偏好）。
 
     经理目录聚合只算一次，汇总表与下钻按钮共用；目录索引会话级缓存，多组 rerun 不重建。"""
     dup_codes = st.session_state.get(KEY_DUP_CODES) or set()
@@ -214,6 +216,17 @@ def render_group(name, codes, results, bench=None):
     highlight = set(dup_codes) | set(dup_within)
     raw_rows = [results[c] for c in codes if c in results]
     if raw_rows:
+        # 基准切换紧贴总览表（预警条都在页面更上方）：行内 excess 两基准都有，切换即换列不重查
+        prefs = load_prefs()
+        cur = prefs.get("benchmark") if prefs.get("benchmark") in BENCHMARKS else DEFAULT_BENCHMARK
+        bench = st.radio(
+            "超额收益基准", list(BENCHMARKS), horizontal=True, index=list(BENCHMARKS).index(cur),
+            format_func=lambda k: BENCHMARKS[k][0], key="bench_sel_radio",
+            help="总览表「超额」3 列 = 基金涨幅 − 所选基准同期涨幅；偏股混合基金指数为中证930950（Wind 885001 等价口径）",
+        )
+        if bench != prefs.get("benchmark"):
+            prefs["benchmark"] = bench
+            save_prefs(prefs)
         disp = pd.DataFrame([display_row(r, bench) for r in raw_rows])
         small_here = {r["代码"] for r in raw_rows if r.get("small")}
         mgrchg_here = {r["代码"] for r in raw_rows if r.get("mgr_chg")}
@@ -225,7 +238,7 @@ def render_group(name, codes, results, bench=None):
         st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除并以「剔N」标注）；仅前十大非全部持仓，明细见基金详情。琥珀底 = 含微利股(PE>500)，数字被极端市盈率放大，比较时需留意")
         st.caption("🧺 「被FOF持有」= 持有该份额的 FOF 数，来自「FOF 持仓分析」页最近一次全市场分析（未分析/超8天/不被持有显示 --，去该页跑一次即可）")
         if bench is not None:
-            st.caption(f"⤴ 「超额」= 基金涨幅 − {BENCHMARKS[bench][0]} 同期涨幅（百分点，红=跑赢 绿=跑输；"
+            st.caption(f"⤴ 「{BENCHMARKS[bench][0]}超额」= 基金涨幅 − 基准同期涨幅（百分点，红=跑赢 绿=跑输；"
                        "基准为中证官网指数（偏股混合基金指数=中证930950，Wind 885001 的等价口径），切换基准在上方按钮")
         render_sortable_table(
             disp,
