@@ -426,6 +426,17 @@ class EastFundClient:
         self.cache.set("fofhold_v1", code, out)
         return out
 
+    def set_fof_held_map(self, held_map):
+        """FOF 持仓分析完成时写入「份额代码 -> 被持 FOF 数」快照（分组查询总览表引用）。
+        held_map 由 page_fof 从聚合结果展开：同一 FOF 持有 A/C 时两个份额代码各 +1。"""
+        self.cache.set("fofagg_v1", "latest", {"held": held_map or {}})
+
+    def get_fof_held_map(self):
+        """最近一次 FOF 全市场分析的份额被持数快照 {份额代码: n}；未分析或超过 8 天
+        （持仓缓存 7 天 + 一天余量）返回 {}，调用方显示 '--'。"""
+        snap = self.cache.get("fofagg_v1", "latest", ttl=8 * 86400)
+        return (snap or {}).get("held") or {}
+
     def search_funds(self, keyword):
         """按名称关键词搜索基金（天天基金搜索建议接口）。返回 [{code,name,type}]，按相关度排序"""
         cached = self.cache.get("search_v2", keyword, ttl=7 * 86400)

@@ -654,7 +654,11 @@ def test_fund_overview_row_raw_and_display():
     assert isinstance(raw["pe_w"], float) and 5.0 <= raw["pe_w"] <= 60.0, raw  # 前十大加权 PE-TTM
     assert isinstance(raw["pe_avg"], float) and raw["pe_w"] > 0, raw
     assert raw["pe_extreme"] is False, raw  # 005827 重仓无微利异常股
+    # 被FOF持有数：值取决于本地是否跑过 FOF 全市场分析（快照 8 天有效），断言与展示口径一致即可
+    _fof = raw.get("fof_held")
+    assert _fof is None or (isinstance(_fof, int) and _fof >= 0), raw
     disp = display_row(raw)
+    assert disp["被FOF持有"] == ("--" if _fof is None else f"{_fof}只"), disp
     assert disp["年费用率%"] == fmt_fee_pct(raw["fee_total"], raw["fee_floating"]), disp
     _suffix = f"剔{raw['pe_loss_n']}" if raw.get("pe_loss_n") else ""
     assert disp["持仓加权PE"] == f"{raw['pe_w']:.1f}{_suffix}", disp
@@ -728,6 +732,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
     fake_raw = {"代码": "999999", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
                 "净值日期": "--", "nav_yuan": 0.3e8, "small": True, "holding": "",
                 "fee_total": None, "fee_floating": False, "pe_w": None, "pe_avg": None,
+                "fof_held": None,
                 "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
                 "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
     from ui.format import display_sort_values, pinyin_key

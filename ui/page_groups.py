@@ -80,6 +80,10 @@ def _move_group(gid, delta):
 with st.sidebar:
     st.header("🔎 查询")
     st.caption("输入自动保存到本地（我的基金.json），下次启动直接点“开始查询”")
+    # 查询按钮置顶：分组多时侧边栏很长，按钮放输入区下方每次都要滚到底才能点到
+    with_holding = st.checkbox("查询持有份额（经理/从业人员）", value=True, help="来自基金中报/年报，首次查询每只基金约需 3~10 秒，之后走本地缓存")
+    submitted = st.button("开始查询", type="primary", width="stretch")
+    st.divider()
     for pos, g in enumerate(st.session_state[KEY_GROUPS]):
         gid = g["id"]
         c_name, c_up, c_down, c_del = st.columns([4, 1, 1, 1])
@@ -116,8 +120,6 @@ with st.sidebar:
     if changed:
         save_groups(st.session_state[KEY_GROUPS])
 
-    with_holding = st.checkbox("查询持有份额（经理/从业人员）", value=True, help="来自基金中报/年报，首次查询每只基金约需 3~10 秒，之后走本地缓存")
-    submitted = st.button("开始查询", type="primary", width="stretch")
     st.divider()
     st.caption(
         "**数据口径说明**\n\n"

@@ -159,6 +159,8 @@ OVERVIEW_COLUMNS = [
     ("持有数据来源", lambda r: r.get("holding_src") or "--", None),
     ("持有较上期", lambda r: _fmt_change(r.get("holding_chg")),
      lambda r: _chg_sort_key(r.get("holding_chg"))),
+    ("被FOF持有", lambda r: f"{r['fof_held']}只" if r.get("fof_held") is not None else "--",
+     lambda r: r.get("fof_held")),
     ("近1月", lambda r: pct(r.get("r1m")), lambda r: r.get("r1m")),
     ("近3月", lambda r: pct(r.get("r3m")), lambda r: r.get("r3m")),
     ("近6月", lambda r: pct(r.get("r6m")), lambda r: r.get("r6m")),
@@ -186,6 +188,7 @@ RAW_ROW_DEFAULTS = {
     "holding": "", "emp_shares": None, "emp_pct": None, "emp_cls": "",
     "emp_cls_shares": None, "emp_cls_pct": None,
     "holding_src": "获取失败", "holding_chg": "", "mgr_chg": "",
+    "fof_held": None,
 }
 
 

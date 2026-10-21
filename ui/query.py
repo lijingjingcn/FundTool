@@ -98,6 +98,7 @@ def fund_overview_row(code, with_holding=True):
       pe_avg      float|None  重仓股（前十大）平均 PE-TTM（盈利股算术平均）
       pe_extreme  bool        含微利异常股（PE>500，已计入统计），总览表琥珀底提示
       pe_loss_n   int         亏损/无PE 只数（已剔除出统计），总览表数字后缀「剔N」
+      fof_held    int|None    持有该份额的 FOF 数（FOF 持仓分析页快照，8 天内有效）
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
       holding     str         经理持有区间原文（'0'/'10-50'/'>100'…），''=未获取
@@ -131,6 +132,9 @@ def fund_overview_row(code, with_holding=True):
         hpe = get_client().fund_holdings_pe(code)
     except FundApiError:
         hpe = {}
+    # 被 FOF 持有数：来自 FOF 持仓分析页最近一次全市场分析的快照（8 天内有效），
+    # 未分析/过期/该份额不被持有为 None（显示 '--'）
+    fof_held = get_client().get_fof_held_map().get(code)
     row = {
         "代码": code,
         "名称": info.get("SHORTNAME", "--"),
@@ -151,6 +155,8 @@ def fund_overview_row(code, with_holding=True):
         "pe_extreme": bool(hpe.get("extreme_n")),
         # 亏损/无PE 剔除只数（不参与加权/平均），总览表数字后缀「剔N」提示口径
         "pe_loss_n": hpe.get("loss_n") or 0,
+        # 持有该份额的 FOF 数（FOF 持仓分析页快照），None=未分析/不被持有
+        "fof_held": fof_held,
         "r1m": ret.get("r1m"),
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),

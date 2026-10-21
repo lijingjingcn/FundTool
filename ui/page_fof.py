@@ -106,6 +106,13 @@ if run or (st.session_state.get(KEY_FOF_RESULT) or {}).get("types") == types_sel
             agg = aggregate_fof_holdings(fof_rows)
             st.session_state[KEY_FOF_RESULT] = {"types": types_sel, "agg": agg,
                                                 "n_fof": len(fofs), "n_empty": empty}
+            # 快照「份额代码->被持FOF数」供分组查询总览表引用（下次查询即生效）
+            held_map = {}
+            for r in agg:
+                for h in r["holders"]:
+                    for s in h["shares"]:
+                        held_map[s["code"]] = held_map.get(s["code"], 0) + 1
+            client.set_fof_held_map(held_map)
             stt.update(label=f"完成：{len(fofs)} 只 FOF、{len(agg)} 个被持母基金", state="complete", expanded=False)
 
     res = st.session_state[KEY_FOF_RESULT]
