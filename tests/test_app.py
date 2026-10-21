@@ -35,7 +35,8 @@ from ui.query import (  # noqa: E402
     group_manager_agg,
     mgr_change_label,
 )
-from ui.render import display_row, fmt_fee_pct, fmt_employee_holding, manager_summary_rows, peer_pct, pct  # noqa: E402
+from ui.format import display_row, fmt_fee_pct, fmt_employee_holding, peer_pct, pct  # noqa: E402
+from ui.render import manager_summary_rows  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_MANAGER,
     KEY_DETAIL_PAGE,
@@ -82,7 +83,7 @@ def overview_rows(at, gi=0):
     KEY_PLAN/KEY_RESULTS 按渲染顺序用 display_row 重建；gi=分组序号，默认选中组）。
 
     「只渲染选中分组」改由经理汇总 expander 的数量断言（stateful tabs + tab.open）。"""
-    from ui.render import display_row
+    from ui.format import display_row
     from ui.state import KEY_PLAN, KEY_RESULTS
     results = at.session_state[KEY_RESULTS] or {}
     codes = at.session_state[KEY_PLAN][gi][1]
@@ -415,7 +416,7 @@ def test_parse_jdzf_ranks():
 def test_peer_rank_column_display_and_coloring():
     """同类排名(近1年/近3年)：'前X%'格式（向上取整、最小1）、数值排序键、
     前25%红字/后25%绿字（总览表统一走 HTML 排序表渲染）"""
-    from ui.render import display_sort_values
+    from ui.format import display_sort_values
 
     base = {"代码": "A", "名称": "测试", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "r1m": None, "r3m": None,
@@ -464,7 +465,7 @@ def test_parse_fee_page():
 
 def test_fmt_fee_pct_and_buy_fee():
     """年费用率/申购费格式化：两位小数、浮费上限档带 *、None -> '--'；申购费带天天折扣档"""
-    from ui.render import fmt_buy_fee, fmt_fee_pct
+    from ui.format import fmt_buy_fee, fmt_fee_pct
     assert fmt_fee_pct(1.4) == "1.40" and fmt_fee_pct(0.6) == "0.60"
     assert fmt_fee_pct(1.8, True) == "1.80*"
     assert fmt_fee_pct(None) == "--"
@@ -475,7 +476,7 @@ def test_fmt_fee_pct_and_buy_fee():
 
 def test_sortable_table_fee_highlight():
     """年费用率列：偏高（>1.5%/年）琥珀底提示（按数值排序键判定，浮费带 * 不影响）、-- 不着色"""
-    from ui.render import display_row, display_sort_values
+    from ui.format import display_row, display_sort_values
     base = {"代码": "007016", "名称": "测试A", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "holding": "",
             "fee_total": 1.4, "fee_floating": False}
@@ -493,7 +494,7 @@ def test_sortable_table_fee_highlight():
 def test_sortable_table_pe_extreme_highlight():
     """含微利股的基金：两个 PE 单元格琥珀底提示（数字忠实计入、只提醒被放大）；
     亏损股剔除以「剔N」后缀标注（展示文本带后缀、排序键仍为数值）；不含的不标"""
-    from ui.render import display_row, display_sort_values
+    from ui.format import display_row, display_sort_values
     base = {"代码": "002095", "名称": "电气基金", "类型": "--", "基金经理": "--", "规模日期": "--",
             "净值日期": "--", "nav_yuan": None, "small": False, "holding": "",
             "fee_total": None, "fee_floating": False,
@@ -546,7 +547,7 @@ def test_calc_pe_stats():
 
 def test_fmt_pe():
     """PE 格式化：一位小数；亏损/无PE 剔除时追加「剔N」后缀；None/非数字 -> '--'（债基无重仓股/获取失败）"""
-    from ui.render import fmt_pe
+    from ui.format import fmt_pe
     assert fmt_pe(27.53) == "27.5" and fmt_pe(20) == "20.0"
     assert fmt_pe(32.75, 2) == "32.8剔2" and fmt_pe(28.87, 1) == "28.9剔1"
     assert fmt_pe(None) == "--" and fmt_pe(None, 3) == "--"  # 无有效股时后缀无意义
@@ -576,7 +577,7 @@ def test_fmt_employee_holding():
 def test_fmt_employee_holding_pair():
     """多级别基金双口径：'A类 6.81% / 合计 225.93万份(3.46%)'；
     级别行缺失/单级别退回合计单值格式"""
-    from ui.render import fmt_employee_holding_pair
+    from ui.format import fmt_employee_holding_pair
     assert fmt_employee_holding_pair("A", 6.8095, 2259263.94, 3.4635) == \
         "A类 6.8095% / 合计 225.93万份(3.4635%)"
     assert fmt_employee_holding_pair("A", 1.6262, 8038597.09, 0.4945) == \
@@ -587,7 +588,7 @@ def test_fmt_employee_holding_pair():
 
 def test_highlight_changes_coloring():
     """涨跌着色：持有变化列 ↑绿底↓红底；阶段涨幅列 正红字负绿字（A 股红涨绿跌，文字色）、-- 不着色；其他列不着色"""
-    from ui.render import _CHG_DOWN_BG, _CHG_UP_BG, _RET_DOWN_FG, _RET_UP_FG, _highlight_changes
+    from ui.detail import _CHG_DOWN_BG, _CHG_UP_BG, _RET_DOWN_FG, _RET_UP_FG, _highlight_changes
     ret = _highlight_changes(pd.Series(["-4.07%", "1.50%", "--"], name="近1月"))
     assert ret == [_RET_DOWN_FG, _RET_UP_FG, ""], ret
     assert _RET_UP_FG.startswith("color:") and _RET_DOWN_FG.startswith("color:"), "阶段涨幅应为文字色"
@@ -692,7 +693,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
                 "fee_total": None, "fee_floating": False, "pe_w": None, "pe_avg": None,
                 "holding_src": "--", "holding_chg": "降2档", "mgr_chg": "新任",
                 "r1m": None, "r3m": 1.5, "r6m": None, "r1y": -28.73}
-    from ui.render import display_sort_values, pinyin_key
+    from ui.format import display_sort_values, pinyin_key
     df = pd.DataFrame([display_row(raw), display_row(fake_raw)])
     sv = display_sort_values([raw, fake_raw])
     h = sortable_table_html(df, small_codes={"999999"}, mgr_change_codes={"005827"},
@@ -738,7 +739,7 @@ def test_sortable_table_explicit_sort_keys_and_highlights():
 def test_pinyin_key_and_name_sort():
     """名称拼音排序键：音节空格分隔、小写，非汉字片段（英文/数字/括号）原样保留小写；
     代码/名称键进入 display_sort_values（总览表「名称」点表头按拼音、「代码」按数字）"""
-    from ui.render import display_sort_values, pinyin_key
+    from ui.format import display_sort_values, pinyin_key
     assert pinyin_key("易方达蓝筹精选混合") == "yi fang da lan chou jing xuan hun he"
     assert pinyin_key("招商中证白酒指数(LOF)A").startswith("zhao shang zhong zheng bai jiu zhi shu"), \
         pinyin_key("招商中证白酒指数(LOF)A")

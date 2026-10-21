@@ -1,34 +1,24 @@
 # -*- coding: utf-8 -*-
-"""渲染层：原始行数据 -> 界面元素（总览表、详情、经理视图、高亮）。
+"""分组查询结果与经理视图的渲染编排。
 
-展示格式化集中在此：display_row 把 query.fund_overview_row 的原始行转成
-总览表行（'204.16亿 ⚠️'、'>100万份'、'↑2档'），sortable_table 的数值排序键
-（sort_values）也在这里从原始字段算出——组件本身不再从展示文本里反向提取数字。
+单只基金详情在 ui.detail、展示格式化与列定义在 ui.format（列注册表）、
+可排序表格组件在 ui.sortable_table；本模块只负责把它们编排成分组结果：
+总览表 + 经理汇总/下钻 + 每只基金详情 + 经理视图（在管基金总览与就地详情）。
 """
-import math
 import re
 
 import pandas as pd
 import streamlit as st
-from pypinyin import lazy_pinyin
 
-from fundtool import (
-    FundApiError,
-    format_range,
-    get_manager_holding,
-    get_manager_holding_history,
-    range_rank,
+from fundtool import FundApiError
+from ui.detail import pick_manager_fund, render_fund_detail, render_fund_detail_section
+from ui.format import (
+    RAW_ROW_DEFAULTS,
+    display_row,
+    display_sort_values,
+    pinyin_key,
 )
-from fundtool.client import PE_EXTREME
-from ui.constants import HISTORY_N, SMALL_NAV_YUAN
-from ui.query import (
-    emp_nums,
-    fund_overview_row,
-    group_manager_agg,
-    manager_dir_index,
-    manager_dir_snapshot,
-    mgr_change_label,
-)
+from ui.query import fund_overview_row, group_manager_agg, manager_dir_index, manager_dir_snapshot
 from ui.sortable_table import render_sortable_table
 from ui.state import (
     KEY_CODE_GROUPS,
@@ -39,375 +29,7 @@ from ui.state import (
     KEY_DUP_WITHIN,
     KEY_GROUP_MGR_VIEW,
     KEY_SINGLE_CODE,
-    KEY_WITH_HOLDING,
-    get_client,
-    record_history,
 )
-
-
-# ---------------- 展示格式化（唯一的文案拼装点） ----------------
-def yi(value, unit="亿"):
-    try:
-        return f"{float(value) / 1e8:.2f}{unit}"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def _fmt_change(chg):
-    """'升1档'/'降2档'/'持平' -> '↑1档'/'↓2档'/'→持平'"""
-    if not chg:
-        return "--"
-    if chg == "持平":
-        return "→持平"
-    return ("↑" if chg.startswith("升") else "↓") + chg[1:]
-
-
-def _chg_sort_key(chg):
-    """'升2档'->2 / '降2档'->-2 / '持平'->0，无法识别返回 None（排序沉底）"""
-    m = re.search(r"\d+", str(chg or ""))
-    if str(chg).startswith("升"):
-        return int(m.group()) if m else None
-    if str(chg).startswith("降"):
-        return -int(m.group()) if m else None
-    return 0 if chg == "持平" else None
-
-
-def pct(value):
-    """阶段涨幅原始值 -> '-2.31%'（None/无效 -> '--'，新基金未满该期）"""
-    try:
-        return f"{float(value):.2f}%"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def peer_pct(value):
-    """同类排名百分位原始值 -> '前96%'（向上取整、最小 1；None -> '--'，新基金未满 1 年）"""
-    try:
-        return f"前{max(1, math.ceil(float(value)))}%"
-    except (TypeError, ValueError):
-        return "--"
-
-
-def fmt_fee_pct(value, floating=False):
-    """年费用率原始值 -> '1.40'（%/年，浮费型取上限档加 *）；None -> '--'（未披露/获取失败）"""
-    if value is None:
-        return "--"
-    return f"{value:.2f}{'*' if floating else ''}"
-
-
-def fmt_buy_fee(fee):
-    """F10 费率 -> 申购费首档文案：'1.50% → 天天基金 0.15%'（无折扣档只显原价；无表 '--'）"""
-    orig = (fee or {}).get("buy_orig") or ""
-    if not orig:
-        return "--"
-    disc = (fee or {}).get("buy_disc") or ""
-    return f"{orig} → 天天基金 {disc}" if disc else orig
-
-
-def fmt_pe(value, loss_n=0):
-    """重仓股 PE-TTM 原始值 -> '27.5'（一位小数）；剔除了亏损/无PE 股票时追加后缀
-    '剔N'（如 '32.8剔2'，口径透明）；None -> '--'（无重仓股/债基/获取失败）"""
-    try:
-        return f"{float(value):.1f}" + (f"剔{loss_n}" if loss_n else "")
-    except (TypeError, ValueError):
-        return "--"
-
-
-def _trim_pct(pct_val):
-    """占比数值 -> 最多 4 位小数去尾零的字符串（8.335325 -> '8.3353'）"""
-    return f"{pct_val:.4f}".rstrip("0").rstrip(".")
-
-
-def fmt_employee_holding(shares, pct_val):
-    """从业人员精确份额 -> '903.84万份(8.3353%)'（份额过万折算万份、占比最多4位小数去尾零；
-    0 -> '0（无人持有）'；None -> '--'）。展示格式化集中在此，别处不得拼展示文案。"""
-    if shares is None:
-        return "--"
-    if shares == 0:
-        return "0（无人持有）"
-    body = f"{shares / 1e4:,.2f}万份" if shares >= 1e4 else f"{shares:,.2f}份"
-    if pct_val is None:
-        return body
-    return f"{body}({_trim_pct(pct_val)}%)"
-
-
-def fmt_employee_holding_pair(cls_letter, cls_pct, tot_shares, tot_pct):
-    """多级别基金的双口径：'A类 6.81% / 合计 225.93万份(3.46%)'——查询代码所属
-    级别按该级别份额为分母、合计按全基金总份额为分母；级别行缺失时退回合计
-    单值格式（fmt_employee_holding）。"""
-    if not cls_letter or cls_pct is None:
-        return fmt_employee_holding(tot_shares, tot_pct)
-    return f"{cls_letter}类 {_trim_pct(cls_pct)}% / 合计 {fmt_employee_holding(tot_shares, tot_pct)}"
-
-
-def pinyin_key(name):
-    """名称 -> 拼音排序键（小写、音节空格分隔；非汉字片段原样保留）。
-    浏览器 localeCompare 的中文排序各内核不一，显式拼音键保证「名称」列
-    点表头在任何浏览器下都按拼音排序。多音字取常用读音。"""
-    return " ".join(lazy_pinyin(str(name or ""))).lower()
-
-
-def display_row(row):
-    """原始行 -> 总览表展示行（列名即表头）。格式化集中在此，别处不得拼展示文案。"""
-    scale = yi(row.get("nav_yuan"))
-    if row.get("small"):
-        scale += " ⚠️"
-    return {
-        "代码": row["代码"],
-        "名称": row["名称"],
-        "类型": row["类型"],
-        "基金经理": row["基金经理"],
-        "规模(净资产)": scale,
-        "年费用率%": fmt_fee_pct(row.get("fee_total"), row.get("fee_floating")),
-        "持仓加权PE": fmt_pe(row.get("pe_w"), row.get("pe_loss_n") or 0),
-        "持仓平均PE": fmt_pe(row.get("pe_avg"), row.get("pe_loss_n") or 0),
-        "规模日期": row["规模日期"],
-        "净值日期": row["净值日期"],
-        "基金经理持有本基金": format_range(row.get("holding")) or "--",
-        "从业人员持有本基金": fmt_employee_holding_pair(
-            row.get("emp_cls"), row.get("emp_cls_pct"), row.get("emp_shares"), row.get("emp_pct")
-        ),
-        "持有数据来源": row.get("holding_src") or "--",
-        "持有较上期": _fmt_change(row.get("holding_chg")),
-        # 阶段涨幅与同类排名列放最后：基础属性/持有信息优先，比较估值时不用左右滚动
-        "近1月": pct(row.get("r1m")),
-        "近3月": pct(row.get("r3m")),
-        "近6月": pct(row.get("r6m")),
-        "今年以来": pct(row.get("rytd")),
-        "近1年": pct(row.get("r1y")),
-        "近2年": pct(row.get("r2y")),
-        "近3年": pct(row.get("r3y")),
-        "近5年": pct(row.get("r5y")),
-        "同类排名(近1年)": peer_pct(row.get("r1y_peer_pct")),
-        "同类排名(近3年)": peer_pct(row.get("r3y_peer_pct")),
-        "同类排名(近5年)": peer_pct(row.get("r5y_peer_pct")),
-    }
-
-
-def display_sort_values(rows):
-    """原始行列表 -> sortable_table 的排序键（规模按元数、收益/持有按数值、变化按升降档；
-    代码按数字（6 位代码下与字典序一致）、名称按拼音——字符串键由组件按 localeCompare 比较）"""
-    return {
-        "代码": [str(r.get("代码") or "") for r in rows],
-        "名称": [pinyin_key(r.get("名称")) for r in rows],
-        "规模(净资产)": [r.get("nav_yuan") for r in rows],
-        "年费用率%": [r.get("fee_total") for r in rows],
-        "持仓加权PE": [r.get("pe_w") for r in rows],
-        "持仓平均PE": [r.get("pe_avg") for r in rows],
-        "近1月": [r.get("r1m") for r in rows],
-        "近3月": [r.get("r3m") for r in rows],
-        "近6月": [r.get("r6m") for r in rows],
-        "今年以来": [r.get("rytd") for r in rows],
-        "近1年": [r.get("r1y") for r in rows],
-        "近2年": [r.get("r2y") for r in rows],
-        "近3年": [r.get("r3y") for r in rows],
-        "近5年": [r.get("r5y") for r in rows],
-        "同类排名(近1年)": [r.get("r1y_peer_pct") for r in rows],
-        "同类排名(近3年)": [r.get("r3y_peer_pct") for r in rows],
-        "同类排名(近5年)": [r.get("r5y_peer_pct") for r in rows],
-        "基金经理持有本基金": [range_rank(r.get("holding")) for r in rows],
-        "从业人员持有本基金": [r.get("emp_shares") for r in rows],
-        "持有较上期": [_chg_sort_key(r.get("holding_chg")) for r in rows],
-    }
-
-
-# ---------------- 单只基金详情 ----------------
-def pick_manager_fund(mgr_id, code, name="", page=""):
-    """从经理视图里点基金：详情就地显示在该经理视图内（而不是长页面最底部）。
-    page 记录详情归属页（"groups"/"single"），避免多页共用会话时详情跨页遗留。"""
-    st.session_state[KEY_SINGLE_CODE] = code
-    st.session_state[KEY_DETAIL_SCOPE] = "manager"
-    st.session_state[KEY_DETAIL_MANAGER] = mgr_id
-    st.session_state[KEY_DETAIL_PAGE] = page
-    record_history(code, name or (get_client().basic_info(code) or {}).get("SHORTNAME") or code)
-
-
-def render_fund_detail_section(code):
-    """单只基金详情块（成功行 + 展开式详情），经理视图内与单只查询页底部共用"""
-    info = get_client().basic_info(code)
-    if info is None:
-        st.error(f"未找到基金 {code}（代码不存在或已清盘）")
-        return
-    st.success(f"**{info.get('SHORTNAME')}**（{code}）· {info.get('FTYPE', '')} · {info.get('JJGS', '')}")
-    with st.expander("基金详情", expanded=True):
-        render_fund_detail(code, with_holding=True)
-
-
-def render_fund_detail(code, with_holding=None):
-    """单只基金的详情（在 expander 内调用）。with_holding=None 时跟随分组查询的勾选项"""
-    info = get_client().basic_info(code)
-    if info is None:
-        st.warning("基本信息不可用")
-        return
-    if with_holding is None:
-        with_holding = st.session_state.get(KEY_WITH_HOLDING)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("单位净值", info.get("DWJZ", "--"), f"{info.get('RZDF', '--')}%（{info.get('FSRQ', '--')}）")
-    c2.metric("净资产规模", yi(info.get("ENDNAV")))
-    c3.metric("份额规模", yi(info.get("FEGM"), "亿份"))
-    c4.metric("风险等级", {"1": "低", "2": "中低", "3": "中", "4": "中高", "5": "高"}.get(str(info.get("RISKLEVEL", "")), "--"))
-    try:
-        nav = float(info.get("ENDNAV"))
-    except (TypeError, ValueError):
-        nav = None
-    if nav is not None and nav < SMALL_NAV_YUAN:
-        st.error("⚠️ 该基金净资产低于 0.5 亿（迷你基金），存在清盘风险，请留意基金公告")
-    left, right = st.columns(2)
-    left.write(
-        f"- **基金公司**：{info.get('JJGS', '--')}\n"
-        f"- **成立日期**：{info.get('ESTABDATE', '--')}\n"
-        f"- **申购状态**：{info.get('SGZT', '--')} / 赎回：{info.get('SHZT', '--')}\n"
-        f"- **重仓股票**：{(info.get('FUNDINVEST') or '--').replace(',', '、')}"
-    )
-    right.write(
-        f"- **基金经理**：{(info.get('JJJL') or '--').replace(',', '、')}\n"
-        f"- **今年以来收益**：{info.get('SYL_JN', '--')}%\n"
-        f"- **近一年收益**：{info.get('SYL_1N', '--')}%\n"
-        f"- **最大回撤(近1年)**：{info.get('MAXRETRA1', '--')}%\n"
-        f"- [查看基金档案 ↗](https://fundf10.eastmoney.com/{code}.html)"
-    )
-    st.markdown("**基金费率**")
-    try:
-        fee = get_client().fee_info(code)
-    except FundApiError:
-        fee = None
-    if fee is None:
-        st.caption("费率信息获取失败（网络恢复后重开本页即可）")
-    elif not (fee.get("mng_text") or fee.get("cust_text") or fee.get("redeem")):
-        st.caption("该基金未披露费率信息")
-    else:
-        f_left, f_right = st.columns(2)
-        f_left.write(
-            f"- **管理费率**：{fee.get('mng_text') or '--'}\n"
-            f"- **托管费率**：{fee.get('cust_text') or '--'}\n"
-            f"- **销售服务费率**：{fee.get('sales_text') or '--'}\n"
-            f"- **年费用率合计**：{fmt_fee_pct(fee.get('total'), fee.get('floating'))}%/年"
-            + ("（浮动费率，展示为上限档）" if fee.get("floating") else "")
-            + "\n"
-            f"- **申购费率(首档)**：{fmt_buy_fee(fee)}"
-        )
-        if fee.get("redeem"):
-            f_right.table(pd.DataFrame(fee["redeem"], columns=["持有期限", "赎回费率"]).style.hide(axis="index"))
-        else:
-            f_right.write("赎回费率：未披露（或无赎回费）")
-        st.caption(
-            "运作费（管理/托管/销售服务）每日从基金资产计提、净值已扣除，无需另行支付；"
-            "申购费为「小于100万元」首档（天天基金优惠价）；赎回费按持有期限递减、先进先出"
-        )
-    st.markdown("**重仓股估值（最新季报前十大，PE-TTM）**")
-    try:
-        hpe = get_client().fund_holdings_pe(code)
-    except FundApiError:
-        hpe = None
-    if hpe is None:
-        st.caption("重仓股估值获取失败（网络恢复后重开本页即可）")
-    elif not hpe.get("stocks"):
-        st.caption("该基金无股票重仓披露（债基/货基或未披露持仓）")
-    else:
-        rows = []
-        for s in hpe["stocks"]:
-            pe = s.get("pe")
-            if pe is None:
-                pe_txt = "--"
-            elif pe <= 0:
-                pe_txt = "亏损"
-            elif pe > PE_EXTREME:  # 微利异常：显示原值（千分位整数+⚠），琥珀字，不参与统计
-                pe_txt = f"{pe:,.0f}⚠"
-            else:
-                pe_txt = f"{pe:.2f}"
-            rows.append({
-                "股票": s["name"], "代码": s["code"],
-                "占净值%": s.get("pct") if s.get("pct") is not None else "--",
-                "PE(TTM)": pe_txt,
-            })
-        hdf = pd.DataFrame(rows)
-
-        def _pe_color(v):
-            if v == "亏损":
-                return "color: #E53935"
-            if v.endswith("⚠"):
-                return "color: #B8860B"
-            return ""
-
-        hdf = hdf.style.apply(lambda col: [_pe_color(v) for v in col], subset=["PE(TTM)"]).hide(axis="index")
-        st.table(hdf)
-        cap = (f"前十大合计占净值 {hpe.get('covered_pct')}%；"
-               f"加权PE {fmt_pe(hpe.get('weighted'))} · 平均PE {fmt_pe(hpe.get('average'))}")
-        if hpe.get("extreme_n"):
-            cap += (f" · ⚠ 含 {hpe['extreme_n']} 只微利股(PE>{PE_EXTREME:.0f})，"
-                    f"其极端市盈率已计入加权/平均，数字可能被显著放大")
-        if hpe.get("loss_n"):
-            cap += f" · 亏损/无PE {hpe['loss_n']}只未参与计算"
-        st.caption(cap)
-    if with_holding:
-        st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
-        hold = get_manager_holding(get_client(), code)
-        if hold["status"] == "ok":
-            rng = format_range(hold.get("manager_range"))
-            emp_shares, emp_pct = emp_nums(hold.get("employees_exact"))
-            emp_cls_val = None
-            _m = re.search(r"([A-Z])$", (info.get("SHORTNAME") or "").strip())
-            if _m:
-                emp_cls_val = (hold.get("employees_exact") or {}).get("classes", {}).get(_m.group(1))
-            emp_cls_shares, emp_cls_pct = emp_nums(emp_cls_val)
-            m1, m2 = st.columns(2)
-            m1.metric("基金经理持有份额（区间）", rng or "见报告原文")
-            m2.metric(
-                "公司从业人员持有",
-                fmt_employee_holding_pair(_m.group(1) if _m else "", emp_cls_pct, emp_shares, emp_pct),
-            )
-            st.caption(
-                f"来源：《{hold.get('report_title')}》（发布于 {hold.get('report_date')}）"
-                + (f"  ·  [报告原文 PDF]({hold.get('pdf_url')})" if hold.get("pdf_url") else "")
-            )
-            if hold.get("manager_line"):
-                st.text(f"报告原文：{hold['manager_line']}")
-            if hold.get("manager_ranges"):
-                parts = "；".join(f"{k} {format_range(v)}" for k, v in hold["manager_ranges"].items())
-                st.caption(f"各份额级别明细（展示值为查询代码所属级别）：{parts}")
-            emp_classes = (hold.get("employees_exact") or {}).get("classes") or {}
-            if emp_classes:
-                parts = []
-                for k, v in emp_classes.items():
-                    try:
-                        p = _trim_pct(float(str(v.get("pct", "")).replace("%", "")))
-                    except ValueError:
-                        p = "--"
-                    parts.append(f"{k}类 {v.get('shares')}份({p}%)")
-                st.caption(f"从业人员各份额级别（分母为该级别份额，与合计口径不同）：{'；'.join(parts)}")
-            try:
-                hist = get_manager_holding_history(get_client(), code, HISTORY_N)
-            except FundApiError:
-                hist = []
-            if hist:
-                st.markdown("**近几期变化（中报/年报逐期对比）**")
-                hdf = pd.DataFrame(
-                    [
-                        {
-                            "报告期": f"{h.get('report_date', '')}{'中报' if '中期' in h.get('report_title', '') else '年报'}",
-                            "经理持有": format_range(h.get("manager_range")) or "--",
-                            "较上期": _fmt_change(h.get("change")),
-                        }
-                        for h in hist
-                    ]
-                )
-                st.table(hdf.style.apply(_highlight_changes, axis=0).hide(axis="index"))
-        else:
-            st.warning(f"未能获取：{hold.get('error')}")
-    tenure = get_client().manager_tenure(code)
-    if tenure:
-        st.markdown("**基金经理任职情况**")
-        _mcl = mgr_change_label(tenure)
-        if _mcl:
-            st.caption(f"🔁 近一年基金经理有变更：{_mcl}（基金经理单元格已琥珀色提示）")
-        tdf = pd.DataFrame(
-            [
-                {"基金经理": "、".join(t["managers"]), "起始": t["start"], "截止": t["end"],
-                 "任职天数": t["days"], "任职回报": f"{t['return_pct']}%"}
-                for t in tenure
-            ]
-        )
-        st.table(tdf.style.hide(axis="index"))
 
 
 # ---------------- 经理视图（单只/经理查询页与分组查询的经理下钻共用） ----------------
@@ -421,7 +43,7 @@ def render_manager_funds(m, page=""):
         f"现任基金 {len(m['codes'])} 只 · 在管总规模 {m['scale']} · "
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
-    # 与分组总览同一套列：含基金经理持有本基金、从业人员持有本基金、持有较上期；点表头排序（语义化：规模按数值、区间按档位、从业人员按精确份额）
+    # 与分组总览同一套列（ui.format 列注册表）：点表头排序（语义化：规模按数值、区间按档位、从业人员按精确份额）
     raw_rows, small_here, mgrchg_here, peext_here = [], set(), set(), set()
     with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理/从业人员持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
@@ -430,17 +52,9 @@ def render_manager_funds(m, page=""):
                 row = fund_overview_row(_code, with_holding=True)
             except FundApiError:
                 row = None
-            if row is None:  # 基本信息也拿不到：用目录里的名称兜底
-                row = {"代码": _code, "名称": _name, "类型": "--", "基金经理": m["name"],
-                       "规模日期": "--", "净值日期": "--", "nav_yuan": None, "small": False,
-                       "fee_total": None, "fee_floating": False,
-                       "pe_w": None, "pe_avg": None, "pe_extreme": False, "pe_loss_n": 0,
-                       "r1m": None, "r3m": None, "r6m": None, "r1y": None,
-                       "r2y": None, "rytd": None, "r3y": None, "r5y": None,
-                       "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,
-                       "holding": "", "emp_shares": None, "emp_pct": None,
-                       "emp_cls": "", "emp_cls_shares": None, "emp_cls_pct": None,
-                       "holding_src": "获取失败", "holding_chg": "", "mgr_chg": ""}
+            if row is None:  # 基本信息也拿不到：用目录里的名称兜底（默认值清单见 ui.format）
+                row = {**RAW_ROW_DEFAULTS, "代码": _code, "名称": _name,
+                       "基金经理": m["name"], "holding_src": "获取失败"}
             else:
                 if row["small"]:
                     small_here.add(_code)
@@ -474,35 +88,7 @@ def render_manager_funds(m, page=""):
         render_fund_detail_section(st.session_state[KEY_SINGLE_CODE])
 
 
-# ---------------- 详情表高亮（Styler，用于详情 expander 内的小表） ----------------
-# 经理持有份额变化：升档绿色 / 降档红色（单元格底色）
-_CHG_UP_BG = "background-color: rgba(46,160,67,0.40)"
-_CHG_DOWN_BG = "background-color: rgba(229,57,53,0.45)"
-# 阶段涨幅（近1月/3月/6月/今年/1年/2年/3月/5年）：正收益红字 / 负收益绿字
-# （A 股习惯红涨绿跌；注意与持有较上期的绿=增持红=减持是两套语义）
-_RET_UP_FG = "color: #E53935"
-_RET_DOWN_FG = "color: #2EA043"
-
-
-def _highlight_changes(col):
-    """涨跌单元格着色（按列，详情 expander 内的 Styler 小表用）：「持有较上期/较上期」↑绿底 ↓红底；
-    阶段涨幅列（近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年）正红字 负绿字（A 股红涨绿跌）；
-    其他列与 --（未满期/无数据）不着色。总览大表的同类着色在 sortable_table 组件内实现。"""
-    name = str(col.name)
-    if name in ("持有较上期", "较上期"):
-        def bg(v):
-            return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
-    elif name in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
-        def bg(v):
-            if v in ("--", ""):
-                return ""
-            return _RET_DOWN_FG if v.startswith("-") else _RET_UP_FG
-    else:
-        return [""] * len(col)
-    return [bg(str(v)) for v in col]
-
-
-# ---------------- 分组结果：经理汇总 + 经理下钻 + 分组整体 ----------------
+# ---------------- 经理汇总表 ----------------
 def manager_summary_rows(items):
     """经理聚合项 -> 汇总表展示行（纯函数，便于测试），列含义见 render_manager_summary。"""
     rows = []
@@ -588,6 +174,7 @@ def render_manager_drilldown(name, items):
         render_manager_funds(m, page="groups")
 
 
+# ---------------- 分组整体：总览表 + 经理汇总/下钻 + 每只基金详情 ----------------
 def render_group(name, codes, results):
     """一个分组的结果：总览表 + 经理汇总/下钻 + 每只基金详情。重复的基金整行高亮。
 

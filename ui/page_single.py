@@ -8,7 +8,8 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool import FundApiError  # noqa: E402
-from ui.render import render_fund_detail_section, render_manager_funds  # noqa: E402
+from ui.detail import render_fund_detail_section  # noqa: E402
+from ui.render import render_manager_funds  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_DETAIL_PAGE,
     KEY_DETAIL_SCOPE,

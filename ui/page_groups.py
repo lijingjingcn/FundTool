@@ -8,8 +8,9 @@ import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.constants import BATCH_SIZE  # noqa: E402
+from ui.format import display_row  # noqa: E402
 from ui.query import count_codes, parse_codes, query_all  # noqa: E402
-from ui.render import display_row, render_group  # noqa: E402
+from ui.render import render_group  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_CODE_GROUPS,
     KEY_DUP_CODES,

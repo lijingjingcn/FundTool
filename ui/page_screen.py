@@ -22,7 +22,7 @@ import streamlit.components.v1 as components
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fundtool import FundApiError, format_range, get_manager_holding  # noqa: E402
 from ui.query import emp_nums  # noqa: E402
-from ui.render import render_sortable_table  # noqa: E402
+from ui.sortable_table import render_sortable_table  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_GROUPS,
     KEY_SCREEN_PENDING,
