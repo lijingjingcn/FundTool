@@ -84,8 +84,11 @@ def emp_nums(emp):
     return shares, pctv
 
 
-def fund_overview_row(code, with_holding=True):
+def fund_overview_row(code, with_holding=True, benchmarks=None):
     """单只基金的原始数据行（分组查询与经理视图共用）。基金不存在返回 None。
+
+    benchmarks：{基准键: {r1m..r5y: %|None}}（调用方批量算好共享，见 page_groups），
+    传入时行内加 excess = {基准键: {各期: 基金涨幅-基准涨幅(百分点)|None}}，供超额列/详情用。
 
     行字段分两类：
     - 直接展示的文本：代码/名称/类型/基金经理/规模日期/净值日期
@@ -157,6 +160,8 @@ def fund_overview_row(code, with_holding=True):
         "pe_loss_n": hpe.get("loss_n") or 0,
         # 持有该份额的 FOF 数（FOF 持仓分析页快照），None=未分析/不被持有
         "fof_held": fof_held,
+        # 各基准超额收益（百分点）：{基准键: {各期: 基金-基准|None}}，未传 benchmarks 为 {}
+        "excess": {},
         "r1m": ret.get("r1m"),
         "r3m": ret.get("r3m"),
         "r6m": ret.get("r6m"),
@@ -180,6 +185,12 @@ def fund_overview_row(code, with_holding=True):
         # 近一年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
         "mgr_chg": mgr_change_label(get_client().manager_tenure(code)),
     }
+    # 超额收益：基金各期涨幅 - 基准同期涨幅（百分点），某期任一侧缺失记 None
+    for bk, bm in (benchmarks or {}).items():
+        row["excess"][bk] = {
+            p: (round(ret.get(p) - bm[p], 2) if ret.get(p) is not None and bm.get(p) is not None else None)
+            for p in ("r1m", "r3m", "r6m", "rytd", "r1y", "r2y", "r3y", "r5y")
+        }
     if with_holding:
         try:
             hold = get_manager_holding(get_client(), code)
@@ -207,10 +218,10 @@ def fund_overview_row(code, with_holding=True):
     return row
 
 
-def query_all(codes, with_holding, status_box, progress_bar):
+def query_all(codes, with_holding, status_box, progress_bar, benchmarks=None):
     """逐只查询，自动分批直到全部完成。返回 ({代码: 原始行}, {代码: 错误})。
     迷你基金/增减持/经理变更等预警信息直接读原始行字段（small/holding_chg/mgr_chg），
-    不再单独维护派生字典。"""
+    不再单独维护派生字典。benchmarks 透传给 fund_overview_row（超额收益）。"""
     results, errors = {}, {}
     total = len(codes)
     n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
@@ -219,7 +230,7 @@ def query_all(codes, with_holding, status_box, progress_bar):
             status_box.update(label=f"第 {i // BATCH_SIZE}/{n_batches} 批完成，批间停顿 {BATCH_PAUSE} 秒…")
             time.sleep(BATCH_PAUSE)
         try:
-            row = fund_overview_row(code, with_holding)
+            row = fund_overview_row(code, with_holding, benchmarks)
             if row is None:
                 errors[code] = "未找到该基金（代码不存在或已清盘）"
                 continue

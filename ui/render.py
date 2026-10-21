@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from fundtool import FundApiError
+from ui.constants import BENCHMARKS, DEFAULT_BENCHMARK
 from ui.detail import pick_manager_fund, render_fund_detail, render_fund_detail_section
 from ui.format import (
     RAW_ROW_DEFAULTS,
@@ -29,7 +30,32 @@ from ui.state import (
     KEY_DUP_WITHIN,
     KEY_GROUP_MGR_VIEW,
     KEY_SINGLE_CODE,
+    load_prefs,
 )
+
+
+def build_benchmarks():
+    """两个基准的各期涨幅（中证官网日线计算，本地缓存 6 小时），供 fund_overview_row
+    计算超额。任一基准获取失败跳过（对应超额列显示 --），全失败返回 {}。"""
+    from ui.state import get_macro
+
+    out = {}
+    try:
+        m = get_macro()
+        for key, (_, idx_code) in BENCHMARKS.items():
+            try:
+                out[key] = m.benchmark_returns(idx_code)
+            except Exception:
+                continue
+    except Exception:
+        return {}
+    return out
+
+
+def pref_bench():
+    """偏好里记忆的超额基准键（页面偏好.json 的 benchmark，默认沪深300）"""
+    b = load_prefs().get("benchmark")
+    return b if b in BENCHMARKS else DEFAULT_BENCHMARK
 
 
 # ---------------- 经理视图（单只/经理查询页与分组查询的经理下钻共用） ----------------
@@ -43,18 +69,20 @@ def render_manager_funds(m, page=""):
         f"现任基金 {len(m['codes'])} 只 · 在管总规模 {m['scale']} · "
         f"累计从业 {_days} 天{_years} · 现任基金最佳回报 {m['best_return']}"
     )
-    # 与分组总览同一套列（ui.format 列注册表）：点表头排序（语义化：规模按数值、区间按档位、从业人员按精确份额）
+    # 与分组总览同一套列（ui.format 列注册表 + 超额3列，基准跟随页面偏好）：点表头排序
     raw_rows, small_here, mgrchg_here, peext_here = [], set(), set(), set()
+    bench = pref_bench()
+    benchmarks = build_benchmarks()
     with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理/从业人员持有份额，首次查询每只约 3~10 秒）…") as _mst:
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
             _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
             try:
-                row = fund_overview_row(_code, with_holding=True)
+                row = fund_overview_row(_code, with_holding=True, benchmarks=benchmarks)
             except FundApiError:
                 row = None
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底（默认值清单见 ui.format）
                 row = {**RAW_ROW_DEFAULTS, "代码": _code, "名称": _name,
-                       "基金经理": m["name"], "holding_src": "获取失败"}
+                       "基金经理": m["name"], "holding_src": "获取失败", "excess": {}}
             else:
                 if row["small"]:
                     small_here.add(_code)
@@ -66,11 +94,11 @@ def render_manager_funds(m, page=""):
         _mst.update(label="查询完成", state="complete", expanded=False)
     st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
     render_sortable_table(
-        pd.DataFrame([display_row(r) for r in raw_rows]),
+        pd.DataFrame([display_row(r, bench) for r in raw_rows]),
         small_codes=small_here,
         mgr_change_codes=mgrchg_here,
         pe_extreme_codes=peext_here,
-        sort_values=display_sort_values(raw_rows),
+        sort_values=display_sort_values(raw_rows, bench),
         title=f"基金信息-经理{m['name']}.csv",
     )
     st.caption("点击基金查看完整详情（含基金经理/从业人员持有份额）")
@@ -175,8 +203,9 @@ def render_manager_drilldown(name, items):
 
 
 # ---------------- 分组整体：总览表 + 经理汇总/下钻 + 每只基金详情 ----------------
-def render_group(name, codes, results):
+def render_group(name, codes, results, bench=None):
     """一个分组的结果：总览表 + 经理汇总/下钻 + 每只基金详情。重复的基金整行高亮。
+    bench：超额收益基准键（BENCHMARKS 之一），None 则总览表不带超额 3 列。
 
     经理目录聚合只算一次，汇总表与下钻按钮共用；目录索引会话级缓存，多组 rerun 不重建。"""
     dup_codes = st.session_state.get(KEY_DUP_CODES) or set()
@@ -185,7 +214,7 @@ def render_group(name, codes, results):
     highlight = set(dup_codes) | set(dup_within)
     raw_rows = [results[c] for c in codes if c in results]
     if raw_rows:
-        disp = pd.DataFrame([display_row(r) for r in raw_rows])
+        disp = pd.DataFrame([display_row(r, bench) for r in raw_rows])
         small_here = {r["代码"] for r in raw_rows if r.get("small")}
         mgrchg_here = {r["代码"] for r in raw_rows if r.get("mgr_chg")}
         peext_here = {r["代码"] for r in raw_rows if r.get("pe_extreme")}
@@ -195,13 +224,16 @@ def render_group(name, codes, results):
         st.caption("💰 「年费用率%」= 管理+托管+销售服务费（%/年），浮费型取上限档带 *，偏高琥珀底提示；各档原文见基金详情")
         st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除并以「剔N」标注）；仅前十大非全部持仓，明细见基金详情。琥珀底 = 含微利股(PE>500)，数字被极端市盈率放大，比较时需留意")
         st.caption("🧺 「被FOF持有」= 持有该份额的 FOF 数，来自「FOF 持仓分析」页最近一次全市场分析（未分析/超8天/不被持有显示 --，去该页跑一次即可）")
+        if bench is not None:
+            st.caption(f"⤴ 「超额」= 基金涨幅 − {BENCHMARKS[bench][0]} 同期涨幅（百分点，红=跑赢 绿=跑输；"
+                       "基准为中证官网指数（偏股混合基金指数=中证930950，Wind 885001 的等价口径），切换基准在上方按钮")
         render_sortable_table(
             disp,
             small_codes=small_here,
             mgr_change_codes=mgrchg_here,
             dup_codes=highlight,
             pe_extreme_codes=peext_here,
-            sort_values=display_sort_values(raw_rows),
+            sort_values=display_sort_values(raw_rows, bench),
             title=f"基金信息-{name}.csv",
         )
         mgr_dir = manager_dir_snapshot()

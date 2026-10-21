@@ -112,6 +112,14 @@ def fmt_pe(value, loss_n=0):
         return "--"
 
 
+def fmt_excess(value):
+    """超额收益原始值（百分点）-> '+5.2' / '-3.1'（带符号一位小数）；None -> '--'"""
+    try:
+        return f"{float(value):+.1f}"
+    except (TypeError, ValueError):
+        return "--"
+
+
 def pinyin_key(name):
     """名称 -> 拼音排序键（小写、音节空格分隔；非汉字片段原样保留）。
     浏览器 localeCompare 的中文排序各内核不一，显式拼音键保证「名称」列
@@ -192,13 +200,28 @@ RAW_ROW_DEFAULTS = {
 }
 
 
-def display_row(row):
-    """原始行 -> 总览表展示行（列名即表头，列序即 OVERVIEW_COLUMNS）。纯函数。"""
-    return {name: fmt(row) for name, fmt, _ in OVERVIEW_COLUMNS}
+def display_row(row, bench=None):
+    """原始行 -> 总览表展示行（列名即表头，列序即 OVERVIEW_COLUMNS）。纯函数。
+    bench 传入基准键（BENCHMARKS 之一）时，表尾追加 3 列超额收益
+    （超额-今年以来/近1年/近3年，基准由调用方切换，基金-基准百分点）。"""
+    out = {name: fmt(row) for name, fmt, _ in OVERVIEW_COLUMNS}
+    ex = (row.get("excess") or {}).get(bench) or {}
+    if bench is not None:
+        out["超额-今年以来"] = fmt_excess(ex.get("rytd"))
+        out["超额-近1年"] = fmt_excess(ex.get("r1y"))
+        out["超额-近3年"] = fmt_excess(ex.get("r3y"))
+    return out
 
 
-def display_sort_values(rows):
+def display_sort_values(rows, bench=None):
     """原始行列表 -> sortable_table 的排序键（规模按元数、收益/持有按数值、变化按升降档；
-    代码按数字、名称按拼音——字符串键由组件按 localeCompare 比较）。纯函数。"""
-    return {name: [key(r) for r in rows]
-            for name, _, key in OVERVIEW_COLUMNS if key is not None}
+    代码按数字、名称按拼音——字符串键由组件按 localeCompare 比较）。纯函数。
+    bench 含义同 display_row：追加超额 3 列的数值键。"""
+    out = {name: [key(r) for r in rows]
+           for name, _, key in OVERVIEW_COLUMNS if key is not None}
+    if bench is not None:
+        ex = [(r.get("excess") or {}).get(bench) or {} for r in rows]
+        out["超额-今年以来"] = [e.get("rytd") for e in ex]
+        out["超额-近1年"] = [e.get("r1y") for e in ex]
+        out["超额-近3年"] = [e.get("r3y") for e in ex]
+    return out

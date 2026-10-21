@@ -125,13 +125,44 @@ def dividend_yield_series(price_rows, tr_rows, lookback_days=365):
 
 def bond_spread_series(value_rows, bond_rows, vkey):
     """任意指标值 − 中国 10 年期国债收益率的点差序列（百分点），按日期精确对齐。"""
-    y10 = {r["date"]: r["cn10"] for r in bond_rows if r.get("cn10") is not None}
+    y10 = {r["date"]: r.get("cn10") for r in bond_rows if r.get("cn10") is not None}
     out = []
     for r in value_rows:
         v, d = r.get(vkey), r.get("date")
         if v is None or d not in y10:
             continue
         out.append({"date": d, vkey: v, "y10": y10[d], "spread": v - y10[d]})
+    return out
+
+
+# 基准指数区间涨幅的期数定义：(键, 回溯自然日数)；rytd 特殊=今年以来（上一年末收盘）
+# 键与基金阶段涨幅（client.parse_period_returns）一致，超额收益直接相减
+_BM_PERIODS = (("r1m", 31), ("r3m", 92), ("r6m", 184), ("rytd", None),
+               ("r1y", 365), ("r2y", 730), ("r3y", 1095), ("r5y", 1825))
+
+
+def index_period_returns(rows):
+    """指数日收盘序列（升序 [{date,close}]）-> 各期区间涨幅 {r1m..r5y: %|None}。
+    口径对齐天天基金阶段涨幅：目标日 = 最新交易日回溯 N 个自然日，取 <= 目标日的
+    最近交易日收盘为期初；今年以来 = 上一年最后一个交易日收盘。序列长度不足该期记 None。
+    纯函数，便于离线测试。"""
+    keys = tuple(k for k, _ in _BM_PERIODS)
+    out = dict.fromkeys(keys)
+    rows = [r for r in rows or [] if r.get("date") and r.get("close")]
+    if not rows:
+        return out
+    dates = [r["date"] for r in rows]
+    closes = [float(r["close"]) for r in rows]
+    last_d = datetime.strptime(dates[-1], "%Y-%m-%d")
+    last_c = closes[-1]
+    for key, days in _BM_PERIODS:
+        if days is None:  # 今年以来：上一年末最后收盘
+            target = f"{last_d.year - 1}-12-31"
+        else:
+            target = (last_d - timedelta(days=days)).strftime("%Y-%m-%d")
+        i = bisect.bisect_right(dates, target) - 1
+        if i >= 0:
+            out[key] = round((last_c / closes[i] - 1) * 100, 2)
     return out
 
 
@@ -223,6 +254,17 @@ class MacroClient:
             raise MacroApiError(f"指数 {code} 未返回估值数据")
         self.cache.set("macro", f"index_{code}", rows)
         return rows
+
+    def benchmark_returns(self, code):
+        """基准指数各期区间涨幅（%）：{r1m..r5y}，键与基金阶段涨幅一致（超额收益直接相减）。
+        基于中证官网日线（index_daily）计算，序列缓存 6 小时、涨幅结果单独缓存 6 小时。
+        序列不足某期（如 930950 发布于 2013 年）该期为 None。失败抛 MacroApiError。"""
+        cached = self.cache.get("macro", f"bmret_{code}", ttl=6 * 3600)
+        if cached is not None:
+            return cached
+        out = index_period_returns(self.index_daily(code))
+        self.cache.set("macro", f"bmret_{code}", out)
+        return out
 
     # ---------- 宏观月度/季度指标 ----------
     def econ(self, kind):

@@ -16,14 +16,16 @@ from fundtool import (
     get_manager_holding_history,
 )
 from fundtool.client import PE_EXTREME
-from ui.constants import HISTORY_N, SMALL_NAV_YUAN
+from ui.constants import BENCHMARKS, HISTORY_N, SMALL_NAV_YUAN
 from ui.format import (
     _fmt_change,
     _trim_pct,
     fmt_buy_fee,
     fmt_employee_holding_pair,
+    fmt_excess,
     fmt_fee_pct,
     fmt_pe,
+    pct,
     yi,
 )
 from ui.query import emp_nums, mgr_change_label
@@ -140,6 +142,47 @@ def _render_holdings_pe_block(code):
         st.caption(cap)
 
 
+def _render_excess_block(code):
+    """超额收益对照块：基金各期涨幅 vs 两基准（沪深300 / 偏股混合基金指数930950）。
+    基准由中证官网日线计算（与基金阶段涨幅同键口径，直接相减），任一基准获取失败
+    该列显示 --，全部失败整块提示。"""
+    st.markdown("**超额收益（vs 沪深300 / 偏股混合基金指数）**")
+    try:
+        ret = get_client().period_returns(code)
+    except FundApiError:
+        ret = {}
+    bms = {}
+    try:
+        from ui.state import get_macro
+        m = get_macro()
+        for bk, (_, idx_code) in BENCHMARKS.items():
+            try:
+                bms[bk] = m.benchmark_returns(idx_code)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not ret:
+        st.caption("基金阶段涨幅不可用，超额暂无法计算")
+        return
+    labels = (("近1月", "r1m"), ("近3月", "r3m"), ("近6月", "r6m"), ("今年以来", "rytd"),
+              ("近1年", "r1y"), ("近2年", "r2y"), ("近3年", "r3y"), ("近5年", "r5y"))
+    short = {"hs300": "沪深300", "pghh": "偏股混合"}
+    rows = []
+    for label, key in labels:
+        f = ret.get(key)
+        r = {"区间": label, "基金": pct(f)}
+        for bk, sname in short.items():
+            bm = (bms.get(bk) or {}).get(key)
+            ex = round(f - bm, 2) if f is not None and bm is not None else None
+            r[sname] = pct(bm)
+            r[f"vs{sname}"] = fmt_excess(ex)
+        rows.append(r)
+    st.table(pd.DataFrame(rows).style.apply(_highlight_changes, axis=0).hide(axis="index"))
+    st.caption("超额 = 基金 − 基准（百分点，红=跑赢 绿=跑输）；偏股混合基金指数为中证 930950"
+               "（Wind 885001 的等价口径），基准序列来自中证官网、缓存 6 小时")
+
+
 def _render_holding_block(code, info):
     """持有块：经理/从业人员持有（多级别双口径）、报告原文、各级别明细、近几期变化"""
     st.markdown("**基金经理 / 从业人员持有本基金（来自定期报告）**")
@@ -233,6 +276,7 @@ def render_fund_detail(code, with_holding=None):
     )
     _render_fee_block(code)
     _render_holdings_pe_block(code)
+    _render_excess_block(code)
     if with_holding:
         _render_holding_block(code, info)
     tenure = get_client().manager_tenure(code)
@@ -263,13 +307,13 @@ _RET_DOWN_FG = "color: #2EA043"
 
 def _highlight_changes(col):
     """涨跌单元格着色（按列，详情 expander 内的 Styler 小表用）：「持有较上期/较上期」↑绿底 ↓红底；
-    阶段涨幅列（近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年）正红字 负绿字（A 股红涨绿跌）；
+    阶段涨幅列（近1月…近5年）与超额列（vs沪深300/vs偏股混合）正红字 负绿字（A 股红涨绿跌）；
     其他列与 --（未满期/无数据）不着色。总览大表的同类着色在 sortable_table 组件内实现。"""
     name = str(col.name)
     if name in ("持有较上期", "较上期"):
         def bg(v):
             return _CHG_UP_BG if v.startswith("↑") else _CHG_DOWN_BG if v.startswith("↓") else ""
-    elif name in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
+    elif name in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年") or name.startswith("vs"):
         def bg(v):
             if v in ("--", ""):
                 return ""

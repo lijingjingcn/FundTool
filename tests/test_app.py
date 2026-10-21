@@ -228,7 +228,7 @@ def test_requery_clears_previous_results_before_query(monkeypatch):
                 "holding_chg": "", "mgr_chg": ""}
     captured = []  # 每次查询入口时刻的 (会话旧结果, 代码列表)
 
-    def fake_query_all(codes, with_holding, status_box, progress_bar):
+    def fake_query_all(codes, with_holding, status_box, progress_bar, benchmarks=None):
         captured.append((st.session_state.get(KEY_RESULTS), list(codes)))
         return ({c: dict(fake_row, 代码=c) for c in codes}, {})
 
@@ -589,6 +589,52 @@ def test_dedupe_fof_universe():
     out = dedupe_fof_universe(uni)
     assert len(out) == 2, out
     assert out[0] == {"code": "005156", "name": "嘉实领航资产配置混合A", "type": "FOF-稳健型"}, out
+
+
+def test_fmt_excess_and_display_bench():
+    """超额收益：带符号一位小数格式化；display_row 传基准键时表尾追加 3 列、排序键同步；
+    未传基准或行内无该基准 excess 时不加列/显示 --"""
+    from ui.format import display_row, display_sort_values, fmt_excess
+    assert fmt_excess(4.25) == "+4.2" and fmt_excess(-3.06) == "-3.1" and fmt_excess(0.0) == "+0.0"
+    assert fmt_excess(None) == "--" and fmt_excess("") == "--"
+    base = {"代码": "005827", "名称": "易方达蓝筹", "类型": "--", "基金经理": "--", "规模日期": "--",
+            "净值日期": "--", "nav_yuan": None, "small": False, "holding": ""}
+    plain = display_row(dict(base))
+    assert "超额-近1年" not in plain, "不传基准不加超额列"
+    row = dict(base, excess={"hs300": {"rytd": 4.25, "r1y": -3.06, "r3y": 12.8}})
+    d = display_row(row, "hs300")
+    assert d["超额-今年以来"] == "+4.2" and d["超额-近1年"] == "-3.1" and d["超额-近3年"] == "+12.8", d
+    assert list(d)[-3:] == ["超额-今年以来", "超额-近1年", "超额-近3年"], "超额列在表尾"
+    d_empty = display_row(dict(base), "hs300")
+    assert d_empty["超额-近1年"] == "--", "行内无 excess 数据时列保留但显示 --（列数稳定）"
+    sv = display_sort_values([row, dict(base)], "hs300")
+    assert sv["超额-近1年"] == [-3.06, None], sv
+
+
+def test_sortable_table_excess_coloring():
+    """总览表超额列着色：正红字负绿字（A 股红=跑赢），-- 不着色"""
+    df = pd.DataFrame([{"代码": "005827", "超额-近1年": "+4.2", "超额-近3年": "-3.1", "超额-今年以来": "--"}])
+    h = sortable_table_html(df)
+    assert '<td class="ret-up" data-sort="+4.2">+4.2</td>' in h, h
+    assert '<td class="ret-down" data-sort="-3.1">-3.1</td>' in h, h
+    assert '<td class="" data-sort="--">--</td>' in h, h
+
+
+def test_index_period_returns():
+    """基准指数区间涨幅：自然日回溯口径、今年以来取上年末、不足期 None"""
+    from datetime import date, timedelta
+    from fundtool.macro import index_period_returns
+    rows, d, c = [], date(2024, 1, 1), 1000.0
+    while d <= date(2026, 10, 21):
+        if d.weekday() < 5:
+            rows.append({"date": d.isoformat(), "close": c})
+            c *= 1.0005
+        d += timedelta(days=1)
+    out = index_period_returns(rows)
+    assert out["r1y"] is not None and 10 < out["r1y"] < 16, out  # 日0.05%复利一年约13%
+    assert out["rytd"] is not None and out["r1m"] is not None, out
+    assert index_period_returns(rows[-300:])["r3y"] is None, "序列不足3年"
+    assert index_period_returns([])["r1y"] is None, "空序列全 None"
 
 
 def test_pct_format():

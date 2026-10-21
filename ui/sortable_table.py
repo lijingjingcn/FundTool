@@ -202,8 +202,8 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
                 # 同类排名各期：前25%红字（好）、后25%绿字（差）——按数值排序键判定，无键/未满期不着色
                 kv = col_keys[ri] if col_keys is not None and ri < len(col_keys) else None
                 cls = "ret-up" if kv is not None and kv <= 25 else "ret-down" if kv is not None and kv > 75 else ""
-            elif c in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年"):
-                # 阶段涨幅：正绿字负红字（文字色），--（未满期/无数据）不着色
+            elif c in ("近1月", "近3月", "近6月", "今年以来", "近1年", "近2年", "近3年", "近5年") or str(c).startswith("超额"):
+                # 阶段涨幅与超额收益：正红字负绿字（A 股红涨绿跌，超额正=跑赢），--（未满期/无数据）不着色
                 cls = "ret-down" if val.startswith("-") and val != "--" else "ret-up" if val not in ("--", "") else ""
             if str(row.get("代码")) in dup_codes:
                 cls = f"{cls} dup".strip()

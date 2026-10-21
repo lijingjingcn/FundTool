@@ -7,10 +7,10 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ui.constants import BATCH_SIZE  # noqa: E402
+from ui.constants import BATCH_SIZE, BENCHMARKS, DEFAULT_BENCHMARK  # noqa: E402
 from ui.format import display_row  # noqa: E402
 from ui.query import count_codes, parse_codes, query_all  # noqa: E402
-from ui.render import render_group  # noqa: E402
+from ui.render import build_benchmarks, render_group  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_CODE_GROUPS,
     KEY_DUP_CODES,
@@ -23,7 +23,9 @@ from ui.state import (  # noqa: E402
     KEY_RESULTS,
     KEY_WITH_HOLDING,
     load_groups,
+    load_prefs,
     new_group,
+    save_prefs,
     save_groups,
 )
 
@@ -190,7 +192,9 @@ if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
     else:
         with st.status(f"正在查询 {len(all_codes)} 只基金（自动分批，每批 {BATCH_SIZE} 只）…", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="准备查询…")
-            results, errors = query_all(all_codes, with_holding, status_box, progress_bar)
+            # 超额收益基准（两基准都算好存入行内，结果区可随时切换显示）
+            results, errors = query_all(all_codes, with_holding, status_box, progress_bar,
+                                        benchmarks=build_benchmarks())
             progress_bar.empty()
             status_box.update(label="查询完成", state="complete", expanded=False)
         st.session_state[KEY_RESULTS] = results
@@ -201,7 +205,18 @@ if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
 # ---------------- 结果展示：分组标签页 ----------------
 results = st.session_state.get(KEY_RESULTS)
 if results is not None:
-    disp = {c: display_row(r) for c, r in results.items()}  # 预警文案用展示行拼装
+    # 超额收益基准切换（选择记忆到 页面偏好.json；行内 excess 两基准都有，切换即换列不重查）
+    prefs = load_prefs()
+    _cur = prefs.get("benchmark") if prefs.get("benchmark") in BENCHMARKS else DEFAULT_BENCHMARK
+    bench_sel = st.radio(
+        "超额收益基准", list(BENCHMARKS), horizontal=True, index=list(BENCHMARKS).index(_cur),
+        format_func=lambda k: BENCHMARKS[k][0], key="bench_sel_radio",
+        help="总览表「超额」3 列 = 基金涨幅 − 所选基准同期涨幅；偏股混合基金指数为中证930950（Wind 885001 等价口径）",
+    )
+    if bench_sel != prefs.get("benchmark"):
+        prefs["benchmark"] = bench_sel
+        save_prefs(prefs)
+    disp = {c: display_row(r, bench_sel) for c, r in results.items()}  # 预警文案用展示行拼装
     if st.session_state.get(KEY_DUP_CODES):
         dup_desc = "、".join(
             f"`{c}`（{disp[c]['名称'] if c in disp else ''}）" for c in sorted(st.session_state[KEY_DUP_CODES])
@@ -251,9 +266,9 @@ if results is not None:
             if not tab.open:
                 continue
             with tab:
-                render_group(name, codes, results)
+                render_group(name, codes, results, bench=bench_sel)
     elif len(non_empty) == 1:
-        render_group(non_empty[0][0], non_empty[0][1], results)
+        render_group(non_empty[0][0], non_empty[0][1], results, bench=bench_sel)
     else:
         st.error("所有代码都查询失败，请检查输入")
     errors = st.session_state.get(KEY_ERRORS) or {}
