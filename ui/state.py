@@ -53,6 +53,9 @@ KEY_MANAGER_VIEWS = "manager_views"       # 多关键词：分块展示的经理
 KEY_MANAGER_MISSING = "manager_missing"   # 未匹配到经理的输入段
 KEY_MANAGER_DUP = "manager_dup_names"     # 同名经理提示 {名字: 匹配人数}
 
+# FOF 持仓分析页
+KEY_FOF_RESULT = "fof_result"             # 分析结果 {types, agg, n_fof, n_empty}，见 page_fof
+
 
 @st.cache_resource
 def get_client():

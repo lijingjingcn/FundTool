@@ -554,6 +554,43 @@ def test_fmt_pe():
     assert fmt_pe("") == "--" and fmt_pe("abc") == "--"
 
 
+def test_parent_fund_key_and_fof_aggregate():
+    """FOF 持仓聚合：母基金键剥离末尾份额字母（ETF/LOF/FOF 的 F/L/T 不误剥）；
+    同一 FOF 持有 A/C 双份额只算 1 个持有人；代表份额取被持次数最多档"""
+    from fundtool.client import aggregate_fof_holdings, parent_fund_key
+    assert parent_fund_key("南方致远混合C") == "南方致远混合"
+    assert parent_fund_key("南方致远混合A") == "南方致远混合"
+    assert parent_fund_key("华夏沪深300ETF") == "华夏沪深300ETF", "ETF 的 T/F 不得剥"
+    assert parent_fund_key("某某混合") == "某某混合"
+    rows = [
+        {"code": "F00001", "name": "甲FOF", "type": "FOF-进取型", "holdings": [
+            {"code": "007416", "name": "南方致远混合C", "pct": 4.76},
+            {"code": "007415", "name": "南方致远混合A", "pct": 2.94},
+            {"code": "014910", "name": "东方红短债债券A", "pct": 11.17},
+        ]},
+        {"code": "F00002", "name": "乙FOF", "type": "FOF-稳健型", "holdings": [
+            {"code": "007415", "name": "南方致远混合A", "pct": 1.5},
+        ]},
+    ]
+    out = aggregate_fof_holdings(rows)
+    assert out[0]["key"] == "南方致远混合" and len(out[0]["holders"]) == 2, out
+    assert out[0]["rep_code"] == "007415", "A 被持 2 次应做代表份额"
+    top_holder = out[0]["holders"][0]
+    assert top_holder["pct"] == 4.76 and len(top_holder["shares"]) == 2, top_holder  # F1 双份额取最高档
+    assert out[1]["key"] == "东方红短债债券" and len(out[1]["holders"]) == 1, out
+
+
+def test_dedupe_fof_universe():
+    """全市场 FOF 母基金去重：A/C 归组取代码最小的代表，不同基金不合并"""
+    from ui.page_fof import dedupe_fof_universe
+    uni = [{"code": "005157", "name": "嘉实领航资产配置混合C", "type": "FOF-稳健型"},
+           {"code": "005156", "name": "嘉实领航资产配置混合A", "type": "FOF-稳健型"},
+           {"code": "005215", "name": "南方全天候策略A", "type": "FOF-稳健型"}]
+    out = dedupe_fof_universe(uni)
+    assert len(out) == 2, out
+    assert out[0] == {"code": "005156", "name": "嘉实领航资产配置混合A", "type": "FOF-稳健型"}, out
+
+
 def test_pct_format():
     """阶段涨幅格式化：两位小数百分数，None/非数字 -> '--'（新基金未满期）"""
     assert pct(-4.07) == "-4.07%"

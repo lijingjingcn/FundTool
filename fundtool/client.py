@@ -126,6 +126,58 @@ def calc_pe_stats(stocks):
 # 重仓股交易所 TEXCH -> 行情接口 secid 市场前缀（1=沪 2=深 5=港；北交所等未覆盖的记 None 不查 PE）
 _PE_MARKET = {"1": "1", "2": "0", "5": "116"}
 
+# 基金份额级别后缀字母（A/B/C/D/E/H/I/R/Y 等）：母基金聚合时从简称末尾剥离。
+# 刻意不含 F/L/T——ETF/LOF/FOF 本身以 F 结尾，剥了会把"XX ETF"切成"XX ET"
+SHARE_CLASS_LETTERS = frozenset("ABCDEHIRY")
+
+
+def parent_fund_key(name):
+    """基金简称 -> 母基金聚合键：剥离末尾的单个份额级别字母（'南方致远混合C' -> '南方致远混合'）。
+    无份额后缀（含 ETF/LOF/FOF 结尾、纯中文名）原样返回。纯函数，便于测试。"""
+    s = str(name or "").strip()
+    if len(s) >= 5 and s[-1] in SHARE_CLASS_LETTERS:
+        return s[:-1]
+    return s
+
+
+def aggregate_fof_holdings(fof_rows):
+    """FOF 持仓反向聚合（纯函数，便于测试）。输入 FOF 行列表：
+    [{code, name, type, holdings: [{code,name,pct}]}]（holdings 为 fof_holdings 的返回），
+    输出按被持基金**母基金**（parent_fund_key）聚合的结果，按持有 FOF 数降序：
+    [{key, rep_code, rep_name, holders: [{fof_code, fof_name, fof_type,
+                                          shares: [{code,name,pct}…], pct}]}]
+    - 同一 FOF 同时持有某基金的 A/C 份额只算 1 个持有人（shares 记全部份额，pct 取最高档）
+    - rep_code/rep_name 取被持次数最多的份额（展示代表份额）
+    """
+    agg = {}  # parent_key -> {"shares": {code: {"name", "n", "pct_sum"}}, "fofs": {fof_code: {...}}}
+    for f in fof_rows or []:
+        for h in f.get("holdings") or []:
+            if not h.get("code"):
+                continue
+            key = parent_fund_key(h.get("name"))
+            slot = agg.setdefault(key, {"shares": {}, "fofs": {}})
+            sh = slot["shares"].setdefault(h["code"], {"name": h.get("name") or h["code"], "n": 0})
+            sh["n"] += 1
+            holder = slot["fofs"].setdefault(f["code"], {
+                "fof_code": f["code"], "fof_name": f.get("name") or f["code"],
+                "fof_type": f.get("type") or "", "shares": [], "pct": None})
+            holder["shares"].append({"code": h["code"], "name": h.get("name") or h["code"],
+                                     "pct": h.get("pct")})
+            p = h.get("pct")
+            if p is not None and (holder["pct"] is None or p > holder["pct"]):
+                holder["pct"] = p
+    out = []
+    for key, slot in agg.items():
+        rep_code = max(slot["shares"], key=lambda c: slot["shares"][c]["n"])
+        out.append({
+            "key": key,
+            "rep_code": rep_code,
+            "rep_name": slot["shares"][rep_code]["name"],
+            "holders": sorted(slot["fofs"].values(), key=lambda h: -(h["pct"] or 0)),
+        })
+    out.sort(key=lambda r: (-len(r["holders"]), -max((h["pct"] or 0) for h in r["holders"])))
+    return out
+
 
 def parse_fee_page(text):
     """F10 费率页 HTML -> {mng/cust/sales: 数值|None, *_text: 原文, total, floating,
@@ -347,6 +399,31 @@ class EastFundClient:
         out = {"stocks": stocks}
         out.update(calc_pe_stats(stocks))
         self.cache.set("hpe_v3", code, out)
+        return out
+
+    def fof_holdings(self, code):
+        """FOF 的基金持仓（移动端持仓接口的 fundfofs，最新定期报告口径的全部持仓基金）：
+        [{code,name,pct}]（TZJJDM/TZJJMC/ZJZBL，pct=占该 FOF 净值比例 %），无持仓返回 []。
+        持仓季度更新，缓存 7 天。FOF 持仓分析页逐只调用。"""
+        cached = self.cache.get("fofhold_v1", code, ttl=7 * 86400)
+        if cached is not None:
+            return cached
+        r = self._get(
+            "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition",
+            params={"FCODE": code, "deviceid": "1", "plat": "Iphone",
+                    "product": "EFund", "version": "6.2.5"},
+        )
+        rows = ((r.json() or {}).get("Datas") or {}).get("fundfofs") or []
+        out = []
+        for it in rows:
+            pct = None
+            try:
+                pct = float(it.get("ZJZBL"))
+            except (TypeError, ValueError):
+                pass
+            out.append({"code": str(it.get("TZJJDM") or ""), "name": it.get("TZJJMC") or "",
+                        "pct": pct})
+        self.cache.set("fofhold_v1", code, out)
         return out
 
     def search_funds(self, keyword):
