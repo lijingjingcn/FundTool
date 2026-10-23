@@ -12,9 +12,12 @@ import time
 
 import streamlit as st  # 只用 st.session_state：经理目录的会话级快照
 
-from fundtool import FundApiError, get_manager_holding, get_manager_holding_history
+from fundtool import FundApiError, RateLimitedError, get_manager_holding, get_manager_holding_history
 from ui.constants import BATCH_PAUSE, BATCH_SIZE, HISTORY_N, MGR_CHANGE_DAYS, SMALL_NAV_YUAN
 from ui.state import KEY_MGR_DIR, KEY_MGR_INDEX, get_client
+
+# query_all 被限流中止时，errors 里用这个保留键放中止原因（不会与 6 位基金代码冲突）
+QUERY_ABORT_KEY = "__aborted__"
 
 
 # ---------------- 输入解析 ----------------
@@ -101,6 +104,7 @@ def fund_overview_row(code, with_holding=True, benchmarks=None):
       pe_avg      float|None  重仓股（前十大）平均 PE-TTM（盈利股算术平均）
       pe_extreme  bool        含微利异常股（PE>500，已计入统计），总览表琥珀底提示
       pe_loss_n   int         亏损/无PE 只数（已剔除出统计），总览表数字后缀「剔N」
+      pe_ok       bool        重仓股查询是否成功（False=行情端点不可用 → 界面提示 PE 暂缺）
       fof_held    int|None    持有该份额的 FOF 数（FOF 持仓分析页快照，8 天内有效）
       r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y float|None  近1月/3月/6月/今年以来/1年/2年/近3年/近5年阶段涨幅（%）
       r1y_peer_pct/r3y_peer_pct/r5y_peer_pct float|None  近1年/近3年/近5年同类排名百分位（0=最好 100=最差，天天基金二级分类）
@@ -158,6 +162,8 @@ def fund_overview_row(code, with_holding=True, benchmarks=None):
         "pe_extreme": bool(hpe.get("extreme_n")),
         # 亏损/无PE 剔除只数（不参与加权/平均），总览表数字后缀「剔N」提示口径
         "pe_loss_n": hpe.get("loss_n") or 0,
+        # 重仓股查询是否成功（False=行情端点不可用，界面提示 PE 暂缺；债基无持仓为 True）
+        "pe_ok": bool(hpe),
         # 持有该份额的 FOF 数（FOF 持仓分析页快照），None=未分析/不被持有
         "fof_held": fof_held,
         # 各基准超额收益（百分点）：{基准键: {各期: 基金-基准|None}}，未传 benchmarks 为 {}
@@ -182,7 +188,7 @@ def fund_overview_row(code, with_holding=True, benchmarks=None):
         "emp_cls_pct": None,
         "holding_src": "",
         "holding_chg": "",
-        # 近一年经理变更（任职记录 12 小时缓存，接口失败返回 [] 不致命）
+        # 近一年经理变更（任职记录 24 小时缓存，接口失败返回 [] 不致命）
         "mgr_chg": mgr_change_label(get_client().manager_tenure(code)),
     }
     # 超额收益：基金各期涨幅 - 基准同期涨幅（百分点），某期任一侧缺失记 None
@@ -221,7 +227,11 @@ def fund_overview_row(code, with_holding=True, benchmarks=None):
 def query_all(codes, with_holding, status_box, progress_bar, benchmarks=None):
     """逐只查询，自动分批直到全部完成。返回 ({代码: 原始行}, {代码: 错误})。
     迷你基金/增减持/经理变更等预警信息直接读原始行字段（small/holding_chg/mgr_chg），
-    不再单独维护派生字典。benchmarks 透传给 fund_overview_row（超额收益）。"""
+    不再单独维护派生字典。benchmarks 透传给 fund_overview_row（超额收益）。
+
+    被数据源限流（RateLimitedError，连续请求失败触发熔断）时立即中止整批，
+    已完成的结果照常返回，中止原因放在 errors[QUERY_ABORT_KEY]——否则被限流后
+    每只基金还要白跑 6 个请求的重试退避，几分钟的查询会被拖成几小时。"""
     results, errors = {}, {}
     total = len(codes)
     n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
@@ -235,6 +245,9 @@ def query_all(codes, with_holding, status_box, progress_bar, benchmarks=None):
                 errors[code] = "未找到该基金（代码不存在或已清盘）"
                 continue
             results[code] = row
+        except RateLimitedError as e:
+            errors[QUERY_ABORT_KEY] = str(e)
+            break
         except FundApiError as e:
             errors[code] = str(e)
         status_box.update(label=f"正在查询第 {i + 1}/{total} 只（第 {i // BATCH_SIZE + 1}/{n_batches} 批）")

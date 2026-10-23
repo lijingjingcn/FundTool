@@ -190,7 +190,7 @@ RAW_ROW_DEFAULTS = {
     "规模日期": "--", "净值日期": "--",
     "nav_yuan": None, "small": False,
     "fee_total": None, "fee_floating": False,
-    "pe_w": None, "pe_avg": None, "pe_extreme": False, "pe_loss_n": 0,
+    "pe_w": None, "pe_avg": None, "pe_extreme": False, "pe_loss_n": 0, "pe_ok": False,
     "r1m": None, "r3m": None, "r6m": None, "r1y": None, "r2y": None,
     "rytd": None, "r3y": None, "r5y": None,
     "r1y_peer_pct": None, "r3y_peer_pct": None, "r5y_peer_pct": None,

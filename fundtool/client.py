@@ -22,6 +22,14 @@ class FundApiError(Exception):
     pass
 
 
+class RateLimitedError(FundApiError):
+    """连续多个请求失败（连接被重置/超时），判定为数据源限流或网络中断。
+
+    与普通 FundApiError 的区别：这表示"现在整体发不出去"。调用方应立即中止整批，
+    而不是逐只继续重试——被限流时一次重试退避就可能几十秒，逐只跑会把几分钟拖成几小时。
+    """
+
+
 def _parse_js_object(text):
     """解析 `var returnjson= {data:[...],pages:9}` 这类键不带引号的非严格 JSON"""
     body = text[text.find("{"):text.rfind("}") + 1]
@@ -49,6 +57,16 @@ def _search_rel_rank(name, kw):
         return 4
     return 5
 
+
+# 行情类接口的缓存时长（秒）：阶段涨幅/同类排名/重仓股 PE/经理任职都随每个交易日更新，
+# 24 小时内取一次足够。旧值 12 小时会让同一批基金一天被完整重取两遍——批量查询时
+# 这笔钱就是"每只基金 6 个请求"，整整乘二。
+DAILY_TTL = 24 * 3600
+
+# 行情快照端点（push2）失败后的冷却时间（秒）：该端点只提供重仓股 PE 这一项附加数据，
+# 一旦被服务端拒绝（本机实测：TLS 握手成功后连接被直接断开），逐只重试只会白等退避。
+# 记住失败，冷却期内直接跳过 PE 抓取，其它字段照常查。
+QUOTE_FAIL_COOLDOWN = 600
 
 # 阶段涨幅接口的 title -> 行字段：Y/3Y/6Y=近1/3/6月（月=yue），1N/2N/3N/5N=近1/2/3/5年（年=nian），
 # JN=今年以来（Z=近1周、LN=成立来不用）
@@ -241,7 +259,7 @@ def parse_jdzf_ranks(text):
 
 
 class EastFundClient:
-    def __init__(self, cache, rate_limit=0.25, timeout=20):
+    def __init__(self, cache, rate_limit=0.25, timeout=20, max_fail_streak=3, breaker_cooldown=90):
         self.cache = cache
         self.rate_limit = rate_limit
         self.timeout = timeout
@@ -253,6 +271,14 @@ class EastFundClient:
         self.session.trust_env = False
         self.session.headers.update({"User-Agent": _UA, "Referer": "https://fund.eastmoney.com/"})
         self._last_req = 0.0
+        # 熔断：连续 max_fail_streak 个请求失败即判定被限流，进入 breaker_cooldown 秒冷却，
+        # 期间所有请求直接抛 RateLimitedError（query_all 据此中止整批，不再逐只白等重试）
+        self.max_fail_streak = max_fail_streak
+        self.breaker_cooldown = breaker_cooldown
+        self._fail_streak = 0
+        self._breaker_until = 0.0
+        self._breaker_reason = ""
+        self._quote_blocked_until = 0.0  # 行情快照端点（PE）的本地冷却，见 QUOTE_FAIL_COOLDOWN
 
     # ---------- 基础设施 ----------
     def _throttle(self):
@@ -261,28 +287,48 @@ class EastFundClient:
             time.sleep(wait)
         self._last_req = time.monotonic()
 
-    def _get(self, url, params=None, timeout=None):
+    def _get(self, url, params=None, timeout=None, attempts=3):
+        """GET（节流 + 短退避重试 + 连续失败熔断）。
+
+        单次请求最多尝试 attempts 次（默认 3 次，退避 2s、4s；附加数据的端点传 1 次快速失败）。
+        旧实现重试 4 次、连接重置时退避 5/10/15/20 秒：一次失败就是 50 秒，被限流时
+        每只基金都要吃一遍，几分钟变几小时（实测 2026-10-23 那次批量查询：前 12 只
+        1.5 秒/只，之后 54 秒/只）。现在改为快速失败，并由熔断兜底：连续 max_fail_streak
+        个请求失败即抛 RateLimitedError，调用方立即中止整批。
+        """
+        attempts = max(1, attempts)
+        remaining = self._breaker_until - time.monotonic()
+        if remaining > 0:
+            raise RateLimitedError(
+                f"数据源冷却中（{self._breaker_reason}），约 {int(remaining) + 1} 秒后自动恢复"
+            )
         last_err = None
-        for attempt in range(4):
+        for attempt in range(attempts):
             try:
                 self._throttle()
                 r = self.session.get(url, params=params, timeout=timeout or self.timeout)
                 r.raise_for_status()
+                self._fail_streak = 0
                 return r
             except requests.RequestException as e:
                 last_err = e
-                # 连接被远端重置（ConnectionResetError 10054）多为风控临时拦截，
-                # 立即重试仍会被重置，需要更长冷却；其他错误用短退避。
-                if isinstance(e, requests.ConnectionError):
-                    time.sleep(5.0 + 5.0 * attempt)
-                else:
-                    time.sleep(1.0 + 2.0 * attempt)
+                if attempt + 1 < attempts:
+                    time.sleep(2.0 * (attempt + 1))
+        self._fail_streak += 1
+        if self._fail_streak >= self.max_fail_streak:
+            self._breaker_until = time.monotonic() + self.breaker_cooldown
+            self._breaker_reason = f"连续 {self._fail_streak} 个请求失败，{type(last_err).__name__}"
+            self._fail_streak = 0
+            raise RateLimitedError(
+                f"数据源连续 {self.max_fail_streak} 个请求失败（疑似限流），已暂停 "
+                f"{self.breaker_cooldown} 秒"
+            ) from last_err
         raise FundApiError(f"请求失败: {url} ({last_err})")
 
     # ---------- 业务接口 ----------
     def basic_info(self, code):
         """基金基本信息：名称/类型/基金经理/规模/净值/公司等；代码不存在返回 None"""
-        cached = self.cache.get("basic", code, ttl=12 * 3600)
+        cached = self.cache.get("basic", code, ttl=DAILY_TTL)
         if cached is not None:
             return cached
         r = self._get(
@@ -304,8 +350,8 @@ class EastFundClient:
     def period_returns(self, code):
         """阶段涨幅（%）：近1月/近3月/近6月/今年以来/近1年/近2年/近3年/近5年
         （r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y），各期 float|None（新基金未满该期为 None）。
-        与基本信息同样缓存 12 小时。缓存 v3：v2 及更早的旧缓存缺 r2y，升键强制重取。"""
-        cached = self.cache.get("period_v3", code, ttl=12 * 3600)
+        与基本信息同样缓存 24 小时。缓存 v3：v2 及更早的旧缓存缺 r2y，升键强制重取。"""
+        cached = self.cache.get("period_v3", code, ttl=DAILY_TTL)
         if cached is not None:
             return cached
         r = self._get(
@@ -325,8 +371,8 @@ class EastFundClient:
     def peer_rank(self, code):
         """各期同类排名百分位（F10 阶段涨幅页）：{r1m/r3m/r6m/rytd/r1y/r2y/r3y/r5y: float|None}，
         0=最好 100=最差（如 4573/4787 名 -> 95.53）。同类口径为天天基金二级分类，每日更新；
-        缓存 12 小时（与阶段涨幅一致）。"""
-        cached = self.cache.get("peerrank_v1", code, ttl=12 * 3600)
+        缓存 24 小时（与阶段涨幅一致）。"""
+        cached = self.cache.get("peerrank_v1", code, ttl=DAILY_TTL)
         if cached is not None:
             return cached
         r = self._get(
@@ -354,10 +400,10 @@ class EastFundClient:
         + 行情接口批量取 PE-TTM，合成明细与统计。返回：
         {stocks: [{code,name,pct,pe}], weighted, average, loss_n, extreme_n, valid_n, covered_pct}
         （字段含义见 calc_pe_stats；亏损/无PE 不参与计算，微利异常股计入并由界面提示）。
-        持仓季度更新但 PE 随行情变动，整体缓存 12 小时（与阶段涨幅一致）；
+        持仓季度更新但 PE 随行情变动，整体缓存 24 小时（与阶段涨幅一致）；
         缓存 v3：v2 曾把微利异常股剔除出统计，按用户口径改回复实计入+提示，升键强制重算。
         无重仓股（债基/货基/未披露）返回 {stocks: []}。附加信息，失败不致命。"""
-        cached = self.cache.get("hpe_v3", code, ttl=12 * 3600)
+        cached = self.cache.get("hpe_v3", code, ttl=DAILY_TTL)
         if cached is not None:
             return cached
         r = self._get(
@@ -383,10 +429,20 @@ class EastFundClient:
                 s["secid"] = f"{mkt}.{s['code']}"
                 secids.append(s["secid"])
         if secids:
-            r2 = self._get(
-                "https://push2.eastmoney.com/api/qt/ulist.np/get",
-                params={"secids": ",".join(secids), "fields": "f12,f13,f115", "fltt": "2"},
-            )
+            # 行情快照端点（push2）只提供 PE 这一项附加数据：失败时只试 1 次并记住
+            # QUOTE_FAIL_COOLDOWN 秒，冷却期内直接跳过——否则每只基金都要为它白等
+            # 2s+4s 退避（实测该端点会在 TLS 握手后直接断开连接）。
+            if time.monotonic() < self._quote_blocked_until:
+                raise FundApiError("行情接口暂不可用（重仓股 PE 显示 --，稍后自动重试）")
+            try:
+                r2 = self._get(
+                    "https://push2.eastmoney.com/api/qt/ulist.np/get",
+                    params={"secids": ",".join(secids), "fields": "f12,f13,f115", "fltt": "2"},
+                    attempts=1,
+                )
+            except FundApiError:
+                self._quote_blocked_until = time.monotonic() + QUOTE_FAIL_COOLDOWN
+                raise
             pe_map = {}
             for it in ((r2.json() or {}).get("data") or {}).get("diff") or []:
                 try:
@@ -516,7 +572,7 @@ class EastFundClient:
 
     def manager_tenure(self, code):
         """基金经理任职记录（现任+离任）。该接口为附加信息，失败不致命。"""
-        cached = self.cache.get("mgrtenure", code, ttl=12 * 3600)
+        cached = self.cache.get("mgrtenure", code, ttl=DAILY_TTL)
         if cached is not None:
             return cached
         try:

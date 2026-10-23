@@ -26,6 +26,7 @@ KEY_QUERY_PENDING = "query_pending"  # 两段式查询：点击帧清旧结果�
                                      # 回点/用户再点一次「开始查询」的第二帧消费并执行长查询。
                                      # 单独一帧的目的是让旧结果大表在点击帧结束时即被清理——
                                      # 长查询期间旧结果不再以灰色（stale 半透明）状态滞留整页
+KEY_QUERY_ABORT = "query_abort"    # 本次查询被限流中止的信息 {"msg","done","total"}（None=正常完成）
 KEY_PLAN = "plan"                  # 本次查询的分组结构 [(分组名, [代码])]
 KEY_WITH_HOLDING = "with_holding"  # 本次查询是否勾选了经理/从业人员持有份额
 KEY_DUP_CODES = "dup_codes"        # 跨分组重复出现的代码集合

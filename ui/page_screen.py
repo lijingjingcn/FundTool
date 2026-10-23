@@ -73,7 +73,7 @@ def merge_class_rows(rows):
 
 def _enrich_managers(rows):
     """给结果行补基金经理姓名（managers，顿号分隔）与净资产规模（nav_yi，亿）。
-    basic_info 12 小时缓存：复核路径在解析报告/规模过滤时已查过（纯缓存命中），
+    basic_info 24 小时缓存：复核路径在解析报告/规模过滤时已查过（纯缓存命中），
     快筛路径逐只补查（约 0.6 秒/只）。"""
     if not rows:
         return

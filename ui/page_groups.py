@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.constants import BATCH_SIZE  # noqa: E402
 from ui.format import display_row  # noqa: E402
-from ui.query import count_codes, parse_codes, query_all  # noqa: E402
+from ui.query import QUERY_ABORT_KEY, count_codes, parse_codes, query_all  # noqa: E402
 from ui.render import build_benchmarks, render_group  # noqa: E402
 from ui.state import (  # noqa: E402
     KEY_CODE_GROUPS,
@@ -19,6 +19,7 @@ from ui.state import (  # noqa: E402
     KEY_GROUPS,
     KEY_GROUP_TABS,
     KEY_PLAN,
+    KEY_QUERY_ABORT,
     KEY_QUERY_PENDING,
     KEY_RESULTS,
     KEY_WITH_HOLDING,
@@ -60,6 +61,8 @@ st.caption(
     "输入自动保存在本地（我的基金.json），下次启动直接查询。"
 )
 
+_SCOPE_ALL = "（全部组）"
+
 
 # ---------------- 侧边栏：分组输入 ----------------
 def _delete_group(gid):
@@ -82,6 +85,14 @@ with st.sidebar:
     st.caption("输入自动保存到本地（我的基金.json），下次启动直接点“开始查询”")
     # 查询按钮置顶：分组多时侧边栏很长，按钮放输入区下方每次都要滚到底才能点到
     with_holding = st.checkbox("查询持有份额（经理/从业人员）", value=True, help="来自基金中报/年报，首次查询每只基金约需 3~10 秒，之后走本地缓存")
+    # 查询范围：默认全部组（与原行为一致）。分组多时一次全查要按只数排队
+    #（每只基金 6 个请求、每个 0.25 秒节流），选单个分组能把耗时按只数缩小
+    scope = st.selectbox(
+        "查询范围",
+        [_SCOPE_ALL] + [g["name"] for g in st.session_state[KEY_GROUPS]],
+        index=0,
+        help="默认查询所有分组的全部代码；选某个分组只查该组，耗时约按只数缩小（结果只出被查分组的标签页）",
+    )
     submitted = st.button("开始查询", type="primary", width="stretch")
     st.divider()
     for pos, g in enumerate(st.session_state[KEY_GROUPS]):
@@ -139,7 +150,7 @@ with st.sidebar:
         "- 经理汇总：每组总览表下方可展开「本组经理汇总」，"
         "在管规模/从业年限来自经理目录快照（缓存 7 天）；"
         "再下方的经理按钮可下钻查看该经理全部在管基金（同「单只/经理查询」）\n\n"
-        "查询结果缓存于 `.cache/`，基本信息 12 小时、持有份额 7 天后自动刷新"
+        "查询结果缓存于 `.cache/`，基本信息/阶段涨幅/重仓股 PE 24 小时、持有份额 7 天后自动刷新"
     )
 
 # ---------------- 查询（两段式） ----------------
@@ -154,6 +165,7 @@ if submitted and not st.session_state.get(KEY_QUERY_PENDING):
     st.session_state[KEY_DUP_CODES] = set()
     st.session_state[KEY_CODE_GROUPS] = {}
     st.session_state[KEY_DUP_WITHIN] = {}
+    st.session_state[KEY_QUERY_ABORT] = None
     st.session_state[KEY_QUERY_PENDING] = True
     st.info("⏳ 正在启动查询…（若几秒后仍未开始，请再点一次“开始查询”）")
     # 注意用 components.html 而非 st.iframe：后者 height=0 时不渲染 iframe，回点不会发生
@@ -163,7 +175,10 @@ if submitted and not st.session_state.get(KEY_QUERY_PENDING):
 # 第二帧（回点帧）：armed 状态下再次「开始查询」（iframe 自动回点或用户手点），
 # 执行真正的查询
 if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
-    plan = [(g["name"], parse_codes(g["codes"])) for g in st.session_state[KEY_GROUPS]]
+    # 查询范围：全部组 / 选中的单个分组（该分组已被删除时退回全部，避免空计划）
+    groups_now = st.session_state[KEY_GROUPS]
+    chosen = [g for g in groups_now if g["name"] == scope] if scope != _SCOPE_ALL else []
+    plan = [(g["name"], parse_codes(g["codes"])) for g in (chosen or groups_now)]
     # 统计跨分组重复：同一代码出现在几个分组
     code_groups = {}
     for gname, g_codes in plan:
@@ -194,7 +209,18 @@ if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
             results, errors = query_all(all_codes, with_holding, status_box, progress_bar,
                                         benchmarks=build_benchmarks())
             progress_bar.empty()
-            status_box.update(label="查询完成", state="complete", expanded=False)
+            abort_msg = errors.pop(QUERY_ABORT_KEY, None)
+            # 被限流时保留已完成的结果并如实告知"还有多少没查"，不要显示成"查询完成"
+            st.session_state[KEY_QUERY_ABORT] = (
+                {"msg": abort_msg, "done": len(results), "total": len(all_codes)} if abort_msg else None
+            )
+            if abort_msg:
+                status_box.update(
+                    label=f"查询中止（已完成 {len(results)}/{len(all_codes)} 只）",
+                    state="error", expanded=True,
+                )
+            else:
+                status_box.update(label="查询完成", state="complete", expanded=False)
         st.session_state[KEY_RESULTS] = results
         st.session_state[KEY_ERRORS] = errors
         st.session_state[KEY_PLAN] = plan
@@ -203,6 +229,14 @@ if submitted and st.session_state.pop(KEY_QUERY_PENDING, False):
 # ---------------- 结果展示：分组标签页 ----------------
 results = st.session_state.get(KEY_RESULTS)
 if results is not None:
+    # 被限流中止：先说明"没查完"，避免用户把不完整的表当成全量结果
+    abort = st.session_state.get(KEY_QUERY_ABORT)
+    if abort:
+        st.error(
+            f"⛔ 本次查询在第 {abort['done']}/{abort['total']} 只被中止：{abort['msg']}。"
+            "已完成的结果仍显示在下方；建议等 1~2 分钟再点「开始查询」，"
+            "或把侧边栏「查询范围」改成单个分组分几次查。"
+        )
     # 超额基准切换在每组总览表上方（render_group 内），紧贴表格
     disp = {c: display_row(r) for c, r in results.items()}  # 预警文案用展示行拼装（不含超额列）
     if st.session_state.get(KEY_DUP_CODES):
@@ -258,7 +292,8 @@ if results is not None:
     elif len(non_empty) == 1:
         render_group(non_empty[0][0], non_empty[0][1], results)
     else:
-        st.error("所有代码都查询失败，请检查输入")
+        if not abort:  # 有结果但全被中止时，原因由上面的红条说明，不再误报"全部失败"
+            st.error("所有代码都查询失败，请检查输入")
     errors = st.session_state.get(KEY_ERRORS) or {}
     if errors:
         st.subheader("⚠️ 未成功的代码")

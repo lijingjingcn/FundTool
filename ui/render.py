@@ -10,7 +10,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-from fundtool import FundApiError
+from fundtool import FundApiError, RateLimitedError
 from ui.constants import BENCHMARKS, DEFAULT_BENCHMARK
 from ui.detail import pick_manager_fund, render_fund_detail, render_fund_detail_section
 from ui.format import (
@@ -75,10 +75,16 @@ def render_manager_funds(m, page=""):
     bench = pref_bench()
     benchmarks = build_benchmarks()
     with st.status(f"正在查询 {m['name']} 在管的 {len(m['codes'])} 只基金（含经理/从业人员持有份额，首次查询每只约 3~10 秒）…") as _mst:
+        aborted = False
         for _i, (_code, _name) in enumerate(zip(m["codes"], m["names"])):
             _mst.update(label=f"正在查询 {_i + 1}/{len(m['codes'])} 只：{_name}")
             try:
                 row = fund_overview_row(_code, with_holding=True, benchmarks=benchmarks)
+            except RateLimitedError as e:
+                # 熔断：整体发不出去时不再逐只空转，已完成的行照常展示
+                st.error(f"⛔ 被数据源限流，已停止查询：{e}（已完成 {_i}/{len(m['codes'])} 只）")
+                aborted = True
+                break
             except FundApiError:
                 row = None
             if row is None:  # 基本信息也拿不到：用目录里的名称兜底（默认值清单见 ui.format）
@@ -92,7 +98,8 @@ def render_manager_funds(m, page=""):
                 if row.get("pe_extreme"):
                     peext_here.add(_code)
             raw_rows.append(row)
-        _mst.update(label="查询完成", state="complete", expanded=False)
+        _mst.update(label="查询中止（被限流）" if aborted else "查询完成",
+                    state="error" if aborted else "complete", expanded=False)
     st.caption("📊 点击表头排序，再点一次切换升/降序（-- 沉底）；导出的 CSV 与当前显示顺序一致")
     render_sortable_table(
         pd.DataFrame([display_row(r, bench) for r in raw_rows]),
@@ -237,6 +244,9 @@ def render_group(name, codes, results):
         st.caption("💰 「年费用率%」= 管理+托管+销售服务费（%/年），浮费型取上限档带 *，偏高琥珀底提示；各档原文见基金详情")
         st.caption("📈 「持仓加权PE/平均PE」= 最新季报前十大重仓股 PE-TTM（按占净值比例加权 / 算术平均，亏损股剔除并以「剔N」标注）；仅前十大非全部持仓，明细见基金详情。琥珀底 = 含微利股(PE>500)，数字被极端市盈率放大，比较时需留意")
         st.caption("🧺 「被FOF持有」= 持有该份额的 FOF 数，来自「FOF 持仓分析」页最近一次全市场分析（未分析/超8天/不被持有显示 --，去该页跑一次即可）")
+        if raw_rows and not any(r.get("pe_ok") for r in raw_rows):
+            st.caption("⚠️ 行情快照接口当前不可用，本组「持仓加权PE / 持仓平均PE」暂为 --；"
+                       "接口恢复后重新查询即可补齐（失败结果不入缓存）")
         if bench is not None:
             st.caption(f"⤴ 「{BENCHMARKS[bench][0]}超额」= 基金涨幅 − 基准同期涨幅（百分点，红=跑赢 绿=跑输；"
                        "基准为中证官网指数（偏股混合基金指数=中证930950，Wind 885001 的等价口径），切换基准在上方按钮")
