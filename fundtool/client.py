@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、基金经理目录、定期报告公告、报告 PDF 下载、基金搜索"""
+"""天天基金（东方财富）数据客户端：基金基本信息、基金经理任职、基金经理目录、定期报告公告、报告 PDF 下载、基金搜索。
+重仓股 PE 的行情快照优先用东财 push2，失败自动回退腾讯行情（qt.gtimg.cn）。"""
 import json
 import os
 import re
@@ -144,6 +145,13 @@ def calc_pe_stats(stocks):
 # 重仓股交易所 TEXCH -> 行情接口 secid 市场前缀（1=沪 2=深 5=港；北交所等未覆盖的记 None 不查 PE）
 _PE_MARKET = {"1": "1", "2": "0", "5": "116"}
 
+# 腾讯行情备用源（PE-TTM）：push2 在部分网络下会被服务端直接断开（TLS 握手成功后
+# RemoteDisconnected，常见于公司网络/风控），腾讯 qt.gtimg.cn 通常仍可用。
+# secid 市场前缀 -> 腾讯代码前缀；返回行形如 v_sh600519="1~名称~代码~…~"，第 39 个字段为市盈率(TTM)
+_TENCENT_QUOTE = "https://qt.gtimg.cn/q="
+_TENCENT_MARKET = {"1": "sh", "0": "sz", "116": "hk"}
+_TENCENT_PE_INDEX = 39
+
 # 基金份额级别后缀字母（A/B/C/D/E/H/I/R/Y 等）：母基金聚合时从简称末尾剥离。
 # 刻意不含 F/L/T——ETF/LOF/FOF 本身以 F 结尾，剥了会把"XX ETF"切成"XX ET"
 SHARE_CLASS_LETTERS = frozenset("ABCDEHIRY")
@@ -279,6 +287,7 @@ class EastFundClient:
         self._breaker_until = 0.0
         self._breaker_reason = ""
         self._quote_blocked_until = 0.0  # 行情快照端点（PE）的本地冷却，见 QUOTE_FAIL_COOLDOWN
+        self._push2_down_until = 0.0     # push2 单独失败后的冷却：期内直接用腾讯备用源
 
     # ---------- 基础设施 ----------
     def _throttle(self):
@@ -395,9 +404,72 @@ class EastFundClient:
         self.cache.set("fees_v1", code, out)
         return out
 
+    # ---------- 重仓股 PE：push2 主源 + 腾讯备用源 ----------
+    def _tencent_pe(self, secids):
+        """腾讯行情批量取 PE-TTM：{secid: pe}。请求失败抛 FundApiError；
+        取不到的代码（停牌/无估值/字段为空）不出现在结果里。"""
+        q = []
+        for sid in secids:
+            mkt, _, code = sid.partition(".")
+            prefix = _TENCENT_MARKET.get(mkt)
+            if prefix and code:
+                q.append(f"{prefix}{code.zfill(5) if prefix == 'hk' else code}")
+        if not q:
+            return {}
+        r = self._get(_TENCENT_QUOTE + ",".join(q), attempts=1)
+        out = {}
+        for line in r.content.decode("gbk", "replace").split(";"):
+            line = line.strip()
+            if not line.startswith("v_"):
+                continue
+            name, _, body = line.partition("=")
+            mkt = {"sh": "1", "sz": "0", "hk": "116"}.get(name[2:4])
+            parts = body.strip().strip('"').split("~")
+            if not mkt or len(parts) <= _TENCENT_PE_INDEX:
+                continue
+            try:
+                pe = float(parts[_TENCENT_PE_INDEX])
+            except (TypeError, ValueError):
+                continue
+            if parts[2]:
+                out[f"{mkt}.{parts[2]}"] = pe
+        return out
+
+    def _quote_pe(self, secids):
+        """批量 PE-TTM：push2 优先，失败或无数据自动回退腾讯行情（口径同为 PE-TTM）。
+        两源都不可用时冷却 QUOTE_FAIL_COOLDOWN 秒，期内直接抛 FundApiError、不再发请求。"""
+        if time.monotonic() < self._quote_blocked_until:
+            raise FundApiError("行情接口暂不可用（重仓股 PE 显示 --，稍后自动重试）")
+        if time.monotonic() >= self._push2_down_until:
+            try:
+                r2 = self._get(
+                    "https://push2.eastmoney.com/api/qt/ulist.np/get",
+                    params={"secids": ",".join(secids), "fields": "f12,f13,f115", "fltt": "2"},
+                    attempts=1,
+                )
+                out = {}
+                for it in ((r2.json() or {}).get("data") or {}).get("diff") or []:
+                    try:
+                        out[f"{it.get('f13')}.{it.get('f12')}"] = float(it.get("f115"))
+                    except (TypeError, ValueError):
+                        pass
+                if out:
+                    return out
+            except FundApiError:
+                self._push2_down_until = time.monotonic() + QUOTE_FAIL_COOLDOWN
+        try:
+            out = self._tencent_pe(secids)
+        except FundApiError:
+            self._quote_blocked_until = time.monotonic() + QUOTE_FAIL_COOLDOWN
+            raise
+        if not out:
+            self._quote_blocked_until = time.monotonic() + QUOTE_FAIL_COOLDOWN
+            raise FundApiError("行情接口未返回 PE 数据（重仓股 PE 显示 --）")
+        return out
+
     def fund_holdings_pe(self, code):
         """基金重仓股估值：移动端持仓接口（最新季报前十大重仓股，含港股市值占比）
-        + 行情接口批量取 PE-TTM，合成明细与统计。返回：
+        + 行情接口批量取 PE-TTM（push2，失败自动回退腾讯行情），合成明细与统计。返回：
         {stocks: [{code,name,pct,pe}], weighted, average, loss_n, extreme_n, valid_n, covered_pct}
         （字段含义见 calc_pe_stats；亏损/无PE 不参与计算，微利异常股计入并由界面提示）。
         持仓季度更新但 PE 随行情变动，整体缓存 24 小时（与阶段涨幅一致）；
@@ -429,26 +501,9 @@ class EastFundClient:
                 s["secid"] = f"{mkt}.{s['code']}"
                 secids.append(s["secid"])
         if secids:
-            # 行情快照端点（push2）只提供 PE 这一项附加数据：失败时只试 1 次并记住
-            # QUOTE_FAIL_COOLDOWN 秒，冷却期内直接跳过——否则每只基金都要为它白等
-            # 2s+4s 退避（实测该端点会在 TLS 握手后直接断开连接）。
-            if time.monotonic() < self._quote_blocked_until:
-                raise FundApiError("行情接口暂不可用（重仓股 PE 显示 --，稍后自动重试）")
-            try:
-                r2 = self._get(
-                    "https://push2.eastmoney.com/api/qt/ulist.np/get",
-                    params={"secids": ",".join(secids), "fields": "f12,f13,f115", "fltt": "2"},
-                    attempts=1,
-                )
-            except FundApiError:
-                self._quote_blocked_until = time.monotonic() + QUOTE_FAIL_COOLDOWN
-                raise
-            pe_map = {}
-            for it in ((r2.json() or {}).get("data") or {}).get("diff") or []:
-                try:
-                    pe_map[f"{it.get('f13')}.{it.get('f12')}"] = float(it.get("f115"))
-                except (TypeError, ValueError):
-                    pass
+            # 行情快照只提供 PE 这一项附加数据：push2 失败自动回退腾讯，两源都不可用时
+            # 冷却 QUOTE_FAIL_COOLDOWN 秒直接跳过（不再逐只白等 2s+4s 重试退避）
+            pe_map = self._quote_pe(secids)
             for s in stocks:
                 if s["secid"] and s["secid"] in pe_map:
                     s["pe"] = pe_map[s["secid"]]
