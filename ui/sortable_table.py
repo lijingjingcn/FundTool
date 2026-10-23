@@ -30,7 +30,7 @@ body { font: 12.5px/1.5 -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif
 .tools { display: flex; justify-content: flex-end; margin: 2px 0 6px; }
 .tools button { font: inherit; padding: 2px 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid #b6bcc8; background: transparent; color: inherit; }
-.wrap { overflow: auto; max-height: 620px; border-radius: 8px; }
+.wrap { overflow: auto; max-height: __MAXH__; border-radius: 8px; }
 table { border-collapse: separate; border-spacing: 0; width: 100%; }
 th { position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none;
   white-space: nowrap; padding: 7px 9px; text-align: left; font-weight: 600;
@@ -112,6 +112,19 @@ function exportCSV() {
 # 「组名(子项)」形式的列名（如 同类排名(近1年)）；「规模(净资产)」这类单列不算组，见下方连续判定
 _GROUPED_COL = _re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
 
+# 表格高度估算（px）：行高实测约 32（td 上下 padding 6+6 + 12.5px 字号的 1.5 倍行高 + 边框），
+# 表头两行约 70、工具条约 40。行少时把整张表铺开、跟着页面一起滚（不再出现表格内部
+# 那条又短又难用的竖向滚动条）；行多时封顶，超过部分才在表格内部滚动（sticky 表头仍生效）。
+_ROW_H = 34
+_BASE_H = 120
+_MIN_TABLE_H = 190
+MAX_TABLE_H = 2000
+
+
+def table_height(n_rows):
+    """按行数估算表格 iframe 高度：min(max(表头+工具条+每行高, 最小值), 上限)"""
+    return min(max(_BASE_H + _ROW_H * n_rows, _MIN_TABLE_H), MAX_TABLE_H)
+
 
 def _leaf_th(col, idx, label=None, rowspan=False):
     """可排序的叶子表头：label 缺省用完整列名；分组列只显示子项标签。
@@ -157,7 +170,7 @@ def _grouped_thead_html(cols):
 
 def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
                         sort_values=None, title="fund_table.csv", dup_codes=None,
-                        pe_extreme_codes=None) -> str:
+                        pe_extreme_codes=None, max_height=None) -> str:
     """生成可排序表格的完整 HTML（纯函数，便于测试）。
     small_codes：迷你基金代码集合，其「规模(净资产)」单元格标红；
     mgr_change_codes：近一年经理有变更的代码集合，其「基金经理」单元格标琥珀色；
@@ -166,12 +179,18 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
     「持仓加权PE/平均PE」单元格标琥珀色（数字被极端市盈率放大，跨基金比较需留意）；
     sort_values：{列名: [排序键…]}，长度须与 df 行数一致，
     键为数字或字符串（如「名称」的拼音键）或 None（沉底），未提供键的列按单元格文本排序。
+    max_height：iframe 高度（px），缺省按行数估算（table_height）；表格滚动区据此留出
+    工具条的高度，行数没超过上限时不出现内部滚动条。
     含「组(子项)」相邻同组列时表头自动两行分组。"""
     small_codes = set(small_codes or ())
     mgr_change_codes = set(mgr_change_codes or ())
     dup_codes = set(dup_codes or ())
     pe_extreme_codes = set(pe_extreme_codes or ())
     sort_values = sort_values or {}
+    if max_height is None:
+        max_height = table_height(len(df))
+    # 滚动区 = iframe 高度 - 工具条（约 40px）：行数没到上限时整表铺开，不出现内部滚动条
+    css = _CSS.replace("__MAXH__", f"{max(160, max_height - 40)}px")
     cols = list(df.columns)
     thead = _grouped_thead_html(cols)
     trs = []
@@ -213,7 +232,7 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
         trs.append("<tr>" + "".join(tds) + "</tr>")
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>{_html.escape(title)}</title><style>{_CSS}</style></head><body>"
+        f"<title>{_html.escape(title)}</title><style>{css}</style></head><body>"
         "<div class='tools'><button onclick='exportCSV()'>⬇️ 导出 CSV</button></div>"
         f"<div class='wrap'><table id='t'>{thead}"
         f"<tbody>{''.join(trs)}</tbody></table></div>"
@@ -224,8 +243,7 @@ def sortable_table_html(df: pd.DataFrame, small_codes=None, mgr_change_codes=Non
 def render_sortable_table(df: pd.DataFrame, small_codes=None, mgr_change_codes=None,
                           sort_values=None, title="fund_table.csv", dup_codes=None,
                           pe_extreme_codes=None):
-    """在 Streamlit 页面上渲染可点表头排序的表格"""
-    n = len(df)
-    height = min(120 + 36 * n, 700)
+    """在 Streamlit 页面上渲染可点表头排序的表格（高度按行数自适应，见 table_height）"""
+    height = table_height(len(df))
     st.iframe(sortable_table_html(df, small_codes, mgr_change_codes, sort_values, title,
-                                  dup_codes, pe_extreme_codes), height=height)
+                                  dup_codes, pe_extreme_codes, max_height=height), height=height)

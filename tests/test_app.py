@@ -961,3 +961,12 @@ def test_screen_bucket_and_merge():
     assert merged[0]["codes"] == "000423 000424", merged[0]  # 高占比级别在前，低级别并入
     assert merged[0]["emp_pct"] == 23.98
     assert merged[1]["codes"] == "000326"
+
+def test_table_height_adapts_to_row_count():
+    """表格高度按行数自适应：35 只不再挤在 620px 内部滚动，超长表格才封顶内滚"""
+    from ui.sortable_table import MAX_TABLE_H, table_height
+
+    assert table_height(10) < table_height(35), "行数多应更高"
+    assert table_height(35) >= 1200, f"35 行应整表铺开，实际 {table_height(35)}"
+    assert table_height(500) == MAX_TABLE_H, "超长表格应封顶"
+    assert table_height(1) >= 150, "单行表格不应被压扁"
