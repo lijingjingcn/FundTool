@@ -112,17 +112,18 @@ function exportCSV() {
 # 「组名(子项)」形式的列名（如 同类排名(近1年)）；「规模(净资产)」这类单列不算组，见下方连续判定
 _GROUPED_COL = _re.compile(r"^(?P<grp>[^(]+)\((?P<sub>[^)]+)\)$")
 
-# 表格高度估算（px）：行高实测约 32（td 上下 padding 6+6 + 12.5px 字号的 1.5 倍行高 + 边框），
-# 表头两行约 70、工具条约 40。行少时把整张表铺开、跟着页面一起滚（不再出现表格内部
-# 那条又短又难用的竖向滚动条）；行多时封顶，超过部分才在表格内部滚动（sticky 表头仍生效）。
-_ROW_H = 34
-_BASE_H = 120
+# 表格高度估算（px）：数据行实测约 31.75（td 上下 padding 6+6 + 12.5px 字号的 1.5 倍行高 + 1px 边框），
+# 两行表头约 70、工具条约 33。最多铺开 MAX_ROWS 行——行数没超过时整表铺开、跟着页面一起滚；
+# 超过后高度封顶，多出来的行在表格内部滚动（sticky 表头仍然生效）。
+_ROW_H = 32
+_BASE_H = 116
 _MIN_TABLE_H = 190
-MAX_TABLE_H = 2000
+MAX_ROWS = 25
+MAX_TABLE_H = _BASE_H + _ROW_H * MAX_ROWS
 
 
 def table_height(n_rows):
-    """按行数估算表格 iframe 高度：min(max(表头+工具条+每行高, 最小值), 上限)"""
+    """按行数估算表格 iframe 高度：min(max(表头+工具条+每行高, 最小值), 25 行封顶)"""
     return min(max(_BASE_H + _ROW_H * n_rows, _MIN_TABLE_H), MAX_TABLE_H)
 
 
